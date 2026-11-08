@@ -131,6 +131,14 @@ the bundled integration; an entry with `extends` shadows it with a custom provid
 [provider contributions](#contribute-a-provider) for the contract and
 [Muse Code](../public-docs/muse-code.md) for setup, per-agent options, and version limitations.
 
+`dsh-provider` registers the selectable `dsh` provider (DeepSeek Harness). It discovers an
+installed official CLI, official desktop app, or DSH NEXT, then either starts a host from that
+install or attaches to a running host with a loopback login link. The same `extends` rule
+applies: command, environment, or enablement overrides belong under `agents.providers.dsh`.
+A built host is a child of the plugin and is stopped only on connection close. An attached
+client is not. Built-ins cannot import the daemon managed-process registry, so this ownership
+stays inside the plugin. See [DeepSeek Harness](../public-docs/dsh.md).
+
 ## Install from a registry
 
 `paseo plugin add owner/slug` installs the registry's reviewed artifact by default.

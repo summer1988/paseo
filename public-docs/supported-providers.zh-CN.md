@@ -18,6 +18,7 @@ nav: 支持的 Provider
 - [Pi](https://pi.dev)。极简的终端编程 Agent，支持多家 Provider 的 LLM。
 - [Antigravity](#antigravity)。通过内置的 Provider 插件使用你已安装的 `agy` CLI。
 - [Muse Code](/docs/muse-code)。Meta 的终端编程 Agent，以 Provider 插件的形式内置。
+- [DeepSeek Harness](/docs/dsh)。通过内置 Provider 插件使用已安装的官方客户端或 DSH NEXT。
 
 ### Antigravity {#antigravity}
 

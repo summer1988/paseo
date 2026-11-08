@@ -18,7 +18,7 @@ A provider is the contract between Paseo and one external agent CLI: how to laun
 
 ## Two tiers
 
-- **Native support**, Paseo ships a bundled adapter for the major agents (Claude Code, Codex, OpenCode, Pi, [Antigravity](/docs/supported-providers#antigravity), [Muse Code](/docs/muse-code)). Auto-discovered when the underlying CLI is installed, with mode metadata and voice support where applicable.
+- **Native support**, Paseo ships a bundled adapter for the major agents (Claude Code, Codex, OpenCode, Pi, [Antigravity](/docs/supported-providers#antigravity), [Muse Code](/docs/muse-code), [DeepSeek Harness](/docs/dsh)). Claude Code, Codex, OpenCode, Pi, Antigravity, and Muse Code are auto-discovered when the underlying CLI is installed, with mode metadata and voice support where applicable. DeepSeek Harness waits until you choose an installed client.
 - **ACP catalog**, any agent speaking the [Agent Client Protocol](https://agentclientprotocol.com) is supported through a generic adapter. Paseo ships a curated catalog of one-click installs (Cursor, Gemini, GitHub Copilot, Hermes, Kimi, Qwen Code, and 25+ more), and you can add any other ACP agent yourself.
 
 Either way, **you install the underlying CLI**. Paseo runs it.
