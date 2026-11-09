@@ -7,7 +7,7 @@ import { IndentRail } from "@/components/indent-rail";
 import { ExpandableBadge } from "@/components/message";
 import { useIsCompactFormFactor } from "@/constants/layout";
 import { useOverviewSummaryLabel } from "./label";
-import type { OverviewToolCallGroup } from "./model";
+import { thoughtOnlyPreview, type OverviewToolCallGroup } from "./model";
 import { OverviewToolCallGroupSheet } from "./sheet";
 
 interface OverviewGroupProps {
@@ -30,6 +30,7 @@ export const OverviewToolCallGroupView = memo(function OverviewToolCallGroupView
   const scrollRef = useRef<ScrollView>(null);
   const isCompact = useIsCompactFormFactor();
   const aggregateSummary = useOverviewSummaryLabel(group.summary);
+  const thoughtPreview = thoughtOnlyPreview(group);
   const scrollToLatest = useCallback(() => {
     scrollRef.current?.scrollToEnd({ animated: false });
   }, []);
@@ -65,6 +66,7 @@ export const OverviewToolCallGroupView = memo(function OverviewToolCallGroupView
         <ExpandableBadge
           testID="tool-call-group"
           label={aggregateSummary}
+          secondaryLabel={thoughtPreview}
           icon={Wrench}
           isLoading={group.isLoading}
           isExpanded={false}
@@ -82,6 +84,7 @@ export const OverviewToolCallGroupView = memo(function OverviewToolCallGroupView
     <ExpandableBadge
       testID="tool-call-group"
       label={aggregateSummary}
+      secondaryLabel={thoughtPreview}
       icon={Wrench}
       isLoading={group.isLoading}
       isExpanded={expanded}

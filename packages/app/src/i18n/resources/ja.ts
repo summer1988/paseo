@@ -461,6 +461,7 @@ export const ja: TranslationResources = {
     row: {
       importing: "インポート中...",
     },
+    workspaces: en.importSession.workspaces,
   },
   workspace: {
     route: {

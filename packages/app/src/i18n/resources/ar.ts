@@ -456,6 +456,7 @@ export const ar: TranslationResources = {
     row: {
       importing: "جارٍ الاستيراد...",
     },
+    workspaces: en.importSession.workspaces,
   },
   workspace: {
     route: {

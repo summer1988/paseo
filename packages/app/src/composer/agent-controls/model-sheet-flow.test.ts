@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ProviderSelectorProvider } from "@/provider-selection/provider-selection";
-import { resolveModelSheetOpening } from "./model-sheet-flow";
+import { acceptsModelSelection, resolveModelSheetOpening } from "./model-sheet-flow";
 
 function provider(id: string, label: string): ProviderSelectorProvider {
   return { id, label, modelSelection: { kind: "models", rows: [] } };
@@ -20,14 +20,38 @@ describe("model sheet opening", () => {
     ).toEqual({ kind: "all" });
   });
 
-  it("opens a running agent directly at its fixed provider", () => {
+  it("opens the provider list when a running agent can see several providers", () => {
     expect(
       resolveModelSheetOpening({
         canSwitchProvider: false,
         providers: [claude, codex],
         selectedProvider: "codex",
       }),
-    ).toEqual({ kind: "provider", providerId: "codex", providerLabel: "Codex" });
+    ).toEqual({ kind: "all" });
+  });
+
+  it("keeps a running chat on the provider that started it", () => {
+    expect(
+      acceptsModelSelection({
+        nextProviderId: "dsh",
+        currentProvider: "omp",
+        canRetarget: false,
+      }),
+    ).toBe(false);
+    expect(
+      acceptsModelSelection({
+        nextProviderId: "omp",
+        currentProvider: "omp",
+        canRetarget: false,
+      }),
+    ).toBe(true);
+    expect(
+      acceptsModelSelection({
+        nextProviderId: "dsh",
+        currentProvider: "omp",
+        canRetarget: true,
+      }),
+    ).toBe(true);
   });
 
   it("falls back to the only provider while live state catches up", () => {

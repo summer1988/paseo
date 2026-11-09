@@ -1,4 +1,13 @@
-import { createContext, useCallback, useContext, useMemo, useReducer, useState } from "react";
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useReducer,
+  useRef,
+  useState,
+} from "react";
 import { useTranslation } from "react-i18next";
 import {
   FlatList,
@@ -173,6 +182,8 @@ export interface ModelBrowserState {
   prepareToOpen: () => void;
   showAll: () => void;
   reset: () => void;
+  /** Opens one provider without treating it as a row the user chose. */
+  showProvider: (providerId: string, providerLabel: string) => void;
   drillDown: (providerId: string, providerLabel: string) => void;
 }
 
@@ -280,6 +291,7 @@ export function useModelBrowser({
   const [searchQuery, setSearchQuery] = useState("");
   const [isSearchFocused, setIsSearchFocused] = useState(false);
   const [searchResetKey, bumpSearchResetKey] = useReducer((key: number) => key + 1, 0);
+  const drilledByUser = useRef(false);
   const hasProfiles = (profiles?.rows.length ?? 0) > 0;
 
   const initialView = useMemo(
@@ -294,8 +306,14 @@ export function useModelBrowser({
   );
 
   const prepareToOpen = useCallback(() => {
+    drilledByUser.current = false;
     setView(initialView);
   }, [initialView]);
+
+  useEffect(() => {
+    if (providers.length <= 1 || view.kind !== "provider" || drilledByUser.current) return;
+    setView({ kind: "all" });
+  }, [providers.length, view.kind]);
 
   const reset = useCallback(() => {
     setSearchQuery("");
@@ -308,8 +326,18 @@ export function useModelBrowser({
     reset();
   }, [reset]);
 
+  const showProvider = useCallback(
+    (providerId: string, providerLabel: string) => {
+      drilledByUser.current = false;
+      setView({ kind: "provider", providerId, providerLabel });
+      reset();
+    },
+    [reset],
+  );
+
   const drillDown = useCallback(
     (providerId: string, providerLabel: string) => {
+      drilledByUser.current = true;
       setView({ kind: "provider", providerId, providerLabel });
       reset();
     },
@@ -419,6 +447,7 @@ export function useModelBrowser({
     prepareToOpen,
     showAll,
     reset,
+    showProvider,
     drillDown,
   };
 }
@@ -888,7 +917,7 @@ function AgentProfilePickerRowView({
 }
 
 /**
- * Pinned above the provider list. Rows are actions, not selections: applying a
+ * Listed under the providers. Rows are actions, not selections: applying a
  * profile writes its values into the composer and nothing stays bound to it, so
  * there is no checkmark and no active row to show.
  */
@@ -1461,8 +1490,21 @@ function ModelBrowserContent({
     );
   }
 
+  const providerList =
+    rootBrowseContent ??
+    (providers.length > 0 ? (
+      <View>
+        {showProfilesSection && profiles ? (
+          <View style={styles.sectionHeading}>
+            <Text style={styles.sectionHeadingText}>{t("modelSelector.providers")}</Text>
+          </View>
+        ) : null}
+        <GroupedProviderRows providers={providers} serverId={serverId} onDrillDown={onDrillDown} />
+      </View>
+    ) : null);
   const allProvidersContent = (
     <View>
+      {providerList}
       {showProfilesSection && profiles ? (
         <AgentProfilesPickerContent
           rows={profiles.rows}
@@ -1470,21 +1512,6 @@ function ModelBrowserContent({
           onEditProfiles={onEditProfiles}
         />
       ) : null}
-      {rootBrowseContent ??
-        (providers.length > 0 ? (
-          <View>
-            {showProfilesSection && profiles ? (
-              <View style={styles.sectionHeading}>
-                <Text style={styles.sectionHeadingText}>{t("modelSelector.providers")}</Text>
-              </View>
-            ) : null}
-            <GroupedProviderRows
-              providers={providers}
-              serverId={serverId}
-              onDrillDown={onDrillDown}
-            />
-          </View>
-        ) : null)}
       {!hasResults ? <ModelSearchEmptyState /> : null}
     </View>
   );

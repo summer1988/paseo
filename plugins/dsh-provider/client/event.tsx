@@ -17,7 +17,6 @@ export function DshEvent({
   return (
     <ScrollView>
       <Text style={style}>{item.data.type}</Text>
-      <Text style={style}>{JSON.stringify(item.data.data, null, 2)}</Text>
     </ScrollView>
   );
 }

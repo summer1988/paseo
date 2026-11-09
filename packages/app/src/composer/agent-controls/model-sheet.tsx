@@ -161,12 +161,7 @@ export function CompactModelSheet({
   });
   const [isOpen, setIsOpen] = useState(false);
   const [isModelBrowserOpen, setIsModelBrowserOpen] = useState(false);
-  const availableProviders = useMemo(() => {
-    if (canSwitchProvider) return providers;
-    const fixedProvider =
-      providers.find((entry) => entry.id === selectedProvider) ?? providers[0] ?? null;
-    return fixedProvider ? [fixedProvider] : [];
-  }, [canSwitchProvider, providers, selectedProvider]);
+  const availableProviders = providers;
   const rootBrowser = useModelBrowser({
     providers: availableProviders,
     selectedProvider,
@@ -236,7 +231,7 @@ export function CompactModelSheet({
     if (destination.kind === "all") {
       modelBrowser.showAll();
     } else {
-      modelBrowser.drillDown(destination.providerId, destination.providerLabel);
+      modelBrowser.showProvider(destination.providerId, destination.providerLabel);
     }
     setIsModelBrowserOpen(true);
   }, [availableProviders, canSwitchProvider, modelBrowser, selectedProvider]);

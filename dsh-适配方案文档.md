@@ -30,7 +30,7 @@ Paseo 的每个客户端都通过 daemon 看同一条时间线。不内嵌 dsh �
 | Hub 无人值守失败关闭                                    | 在插件能精确预批准被注入的那一个 Paseo MCP server 及其工具之前，不把 dsh 的审批策略改成 `never`，也不设置 `DSH_PERMISSION_MODE=danger-full-access`                                 |
 | 辅助进程可回收                                          | 只有「用此客户端构建」拉起的 Host 由插件记下 pid 并在连接关闭时终止。内置插件不能引用 daemon 的 managed-process registry，所以这份所有权留在插件里。直接使用的客户端不记录、不终止 |
 
-`agents.providers.dsh` 只放覆盖项：`command`、`env`、`enabled`。不要写 `extends`。写了 `extends` 会盖住内置适配器，这是 Muse 已经定下的规则（`docs/plugins.md`）。
+`agents.providers.dsh` 只放 `enabled`。不要写 `extends`，写了会盖住内置适配器。不要靠 `command` 选择客户端：daemon 不会因为 PATH 上没有 `dsh` 把这个提供方标成不可用。客户端在设置里选。
 
 ## 已安装的客户端
 
@@ -50,7 +50,7 @@ Paseo 的每个客户端都通过 daemon 看同一条时间线。不内嵌 dsh �
 
 用该安装自己的 Host 入口再起一个进程。官方 CLI 是 `dsh web --no-open --host 127.0.0.1 --port 0`。官方桌面和 DSH NEXT 在应用里能找到 `dsh-desktop-host` 时，用 Electron 的 Node 模式启动该入口，profile 为 `desktop`。profile 和 home 用上面记下的那一对，因此账号、技能、以及装在这个 profile 上的插件会生效。桌面客户端正在开着也照样起这个进程：端口错开，窗口不多开一个。Paseo 拥有这个进程。关掉 Paseo 只停这一代，不退出用户的桌面应用。读不到 Host 入口的安装不能构建。
 
-启动后 stdout 上的根 URL 带一次性 `?token=`。插件只对 `GET /` 或 `/connect` 用它换签名 cookie，随后丢掉 token。cookie 只留在插件进程内存里。`/api` 不接受 query token，也不接受 `Authorization` 头。请求带 loopback `Host`，POST 的 `Content-Type` 是 `application/json`。不把进程绑到 `0.0.0.0`，不放宽 `--trusted-host`。
+启动后 stdout 上的根 URL 带一次性 `?token=`。插件只对 `GET /?token=` 用它换浏览器会话 cookie（303），随后丢掉 token。不用 `/connect`：那张 operator cookie 的 peer 会在 mux 套接字关闭时被删掉，接下来的 `/api` 就是 401。cookie 写在 daemon home 的 `plugin-settings/dsh-provider/session.json`，不进设置 RPC，也不进日志。Paseo 重启后用它重连。`/api` 不接受 query token，也不接受 `Authorization` 头。请求带 loopback `Host`，POST 的 `Content-Type` 是 `application/json`，正文是 `{ type: "client-request", rpcId, method, payload: { args } }`。不把进程绑到 `0.0.0.0`，不放宽 `--trusted-host`。
 
 同一个 Session 已被桌面应用写着时，恢复返回 `session/writer-held`。插件把这句话显示出来，不抢锁，不另建一个空会话冒充原会话。
 
@@ -58,7 +58,7 @@ Paseo 的每个客户端都通过 daemon 看同一条时间线。不内嵌 dsh �
 
 连接用户指定的、已经在听的 Host。Paseo 不拥有这个进程：不启动、不重启、不回收，`session.can_stop_runtime` 对这个 Host 回答 `false`。
 
-授权只来自用户从该客户端界面复制的本机登录链接（`http://127.0.0.1:<port>/?token=…` 或 `/connect?token=…`）。插件立刻换 cookie，链接和 token 不写入设置、日志或时间线。Host 重启后 cookie 失效，设置里要求再贴一次新链接。
+授权只来自用户从该客户端界面复制的本机登录链接（`http://127.0.0.1:<port>/?token=…`）。插件立刻用这个根地址换 cookie。链接和 token 不写入设置、日志或时间线。cookie 只留在 daemon 侧文件里，所以 Paseo 重启后还能连上原来的 Host。Host 自己重启后 cookie 失效，文件被删掉，设置里要求再贴一次新链接。
 
 这个链接今天从哪来：
 
@@ -78,7 +78,7 @@ Paseo 的每个客户端都通过 daemon 看同一条时间线。不内嵌 dsh �
 
 `session.create` 使用 Paseo 给出的 cwd、模型和 agent preset。持久化句柄是 dsh 的 `sessionId`，Paseo 原样保存。重新打开时走 dsh 的 resume，并用 `session/follow` 把已有事件放进时间线，`history` 用 `replay`。dsh 不提供的 `session/load` 回放不另做一套。
 
-`session/list` 用于导入。导入一行只调用一次恢复，不再次列举。冷会话的列表不激活 Agent。
+`session/list` 用于导入，参数是 `{ _request: {} }`。工作区名单来自 `workspace/follow` 的第一帧。导入会话顶部按工作区勾选。勾选之后，每个尚未导入的用户会话仍只调用一次恢复。列表不含子代理、空白会话和已归档会话，也不激活 Agent。
 
 子代理用 `session.subsession`：`session.opened` 带 `parentSessionId` 和拉起它的 `toolCallId`，`restoration` 为 `parent`。dsh 对 `origin: subagent` 的所有权围栏保持有效，父会话的归档会挡住子树的下一步。
 
@@ -95,7 +95,7 @@ Paseo 的每个客户端都通过 daemon 看同一条时间线。不内嵌 dsh �
 | 用户消息、附件、图像                                       | `prompt.message`、`prompt.image`                     | `session.prompt`。图像按 dsh 的附件收据提交。只在当前模型声明支持图像时发送                                                                                              |
 | 斜杠命令、`/plan`、`/plan off`、`/compact`、用户可调用技能 | `prompt.command`、`session.commands`                 | 命令目录来自 dsh 的 command 服务和 `skills/list`。`session/query` 能识别命令时走它；否则按 dsh 客户端的同一调用发送。技能正文由 dsh 在运行时加载，Paseo 不另存一份       |
 | 排队和 steer                                               | `prompt.steer`                                       | 活动回合用 dsh 的队列 steer。停止回合时丢掉还没被读到的 steer                                                                                                            |
-| 模型、reasoning effort                                     | catalog、`session.configure`                         | 目录来自 Host 的模型目录。选中值是 provider 加 model。reasoning 用 `thought_level` 那一组；空的 “Provider default” 在界面上用稳定的非空 id，写回 dsh 时还原成省略 effort |
+| 模型、reasoning effort                                     | catalog、`session.configure`                         | 目录来自 Host 的模型目录。选中值仍是 provider 加 model 的编码；选择器显示模型名，说明用分组名或模型自己的说明。聊天的模型菜单先列出已启用的提供方，提供方在配置文件上面。已经开始的会话停在启动它的提供方上，选中别的提供方不会把那个模型 id 写进当前进程，而是记下提供方和模型，留给下一次新聊天。reasoning 用 `thought_level` 那一组；空的 “Provider default” 在界面上用稳定的非空 id，写回 dsh 时还原成省略 effort |
 | 权限预设、审批策略、额外目录                               | `session.config` 的 select / toggle                  | 对应 `--permission-mode`、`--approval-policy`、`--add-dir`。默认保持 dsh 的 workspace-write 和询问，不在目录项里改成全开                                                 |
 | 工具审批                                                   | `permission`，`kind: "tool"`                         | 允许一次或拒绝。自动接受只选择明确的 allow 动作。没有 allow 动作时继续等用户                                                                                             |
 | `exit_plan_mode` 的计划审阅                                | `permission`，`kind: "plan"`                         | 正文是那份 markdown。Approve 离开 plan；Keep planning 把反馈送回去。关掉卡片等于结束这一轮，下一句用户消息开始新请求                                                     |
@@ -141,7 +141,7 @@ Paseo 的每个客户端都通过 daemon 看同一条时间线。不内嵌 dsh �
 - `packages/protocol`
 - `$PASEO_HOME/config.json` 的示例不作为安装步骤
 
-选择存在插件设置里，键是一条安装记录的 id 加上 `build` 或 `attach`。不保存 token、cookie 或带 token 的 URL。用户还没选时，第一次开会话先问，不擅自构建，也不擅自附着。
+选择存在插件设置里，键是一条安装记录的 id 加上 `build` 或 `attach`。不保存 token 或带 token 的 URL。cookie 不放进这份设置。模型目录用安装、模式和登录代数做缓存键，设置页和每个工作区共用同一份。用户还没选时，第一次开会话先问，不擅自构建，也不擅自附着。
 
 测试放在插件目录，用录下来的 Remote 帧和假的安装清单。断言覆盖：三种安装都能被认出来、官方桌面的直接使用保持不可用、构建使用该安装自己的入口而不是 PATH 上的另一个 `dsh`、直接使用不把对方进程记入回收、模型写回、审批、计划审阅、提问取消、命令、子会话、未知事件仍出现、`session/writer-held` 失败可见。不跑整库测试。实现后跑 `npm run typecheck`、`npm run lint -- plugins/dsh-provider`，以及该插件自己的 `npx vitest run`。
 

@@ -49,11 +49,99 @@ export function reasoningForWrite(thinkingOption: string | null | undefined): st
 
 export { PROVIDER_DEFAULT_THINKING };
 
+export interface LiveAttempt {
+  attemptId: string;
+  text: string;
+  reasoning: string;
+}
+
+export interface LiveFrameResult {
+  state: LiveAttempt | undefined;
+  items: ProviderTimelineItem[];
+  /** Durable assistant event that replaces this live attempt. */
+  commit?: { seq: number; attemptId: string };
+}
+
+/** Live assistant frames become the same timeline rows a finished message will update. */
+export function reduceAssistantFrame(
+  state: LiveAttempt | undefined,
+  frame: unknown,
+): LiveFrameResult {
+  if (!isRecord(frame) || typeof frame.type !== "string") return { state, items: [] };
+  if (frame.type === "start" && typeof frame.attemptId === "string") {
+    return { state: { attemptId: frame.attemptId, text: "", reasoning: "" }, items: [] };
+  }
+  if (frame.type === "end") {
+    const outcome = isRecord(frame.outcome) ? frame.outcome : undefined;
+    const attemptId = typeof frame.attemptId === "string" ? frame.attemptId : state?.attemptId;
+    if (outcome?.kind === "committed" && typeof outcome.seq === "number" && attemptId) {
+      return { state: undefined, items: [], commit: { seq: outcome.seq, attemptId } };
+    }
+    return { state: undefined, items: [] };
+  }
+  if (frame.type !== "chunk" || !state || !isRecord(frame.chunk)) return { state, items: [] };
+  const next = applyChunk(state, frame.chunk);
+  return { state: next.state, items: next.items };
+}
+
+export function liveItemId(attemptId: string, kind: "assistant" | "reasoning"): string {
+  return kind === "assistant" ? `live:${attemptId}` : `live:${attemptId}:reasoning`;
+}
+
+/** A finished tool row keeps the name and shape of the call that started it. */
+export function completeToolCall(
+  running: ProviderTimelineItem | undefined,
+  finished: ProviderTimelineItem,
+): ProviderTimelineItem {
+  if (finished.type !== "tool_call" || running?.type !== "tool_call") return finished;
+  const name = finished.name === "tool" ? running.name : finished.name;
+  if (finished.detail.type === "plain_text") return { ...finished, name };
+  return { ...finished, name, detail: withOutput(running.detail, outputOf(finished.detail)) };
+}
+
+/** usage_updated replaces the whole usage object, so a later token count must keep the window. */
+export function rememberContextWindow(
+  remembered: number | undefined,
+  usage: ProviderUsage,
+): { remembered: number | undefined; usage: ProviderUsage } {
+  const next =
+    typeof usage.contextWindowMaxTokens === "number" ? usage.contextWindowMaxTokens : remembered;
+  if (next === undefined) return { remembered, usage };
+  return { remembered: next, usage: { ...usage, contextWindowMaxTokens: next } };
+}
+
+const hiddenEventTypes = new Set([
+  "permission/preset",
+  "sandbox/mode",
+  "approval/policy",
+  "model/selection",
+  "agent/inbox/spliced",
+  "step/start",
+  "step/end",
+  "system/message",
+  "request/header",
+  "session/title",
+  "session/title-llm-request",
+  "job/registered",
+  "job/settled",
+  "workspace/changes",
+  "assistant/attempt",
+  "llm/retry",
+  "llm/retry-started",
+  "session/end-seed",
+  "approval/asked",
+  "approval/decided",
+]);
+
 export function mapWireEvent(event: WireEvent): MappedEvent {
+  if (hiddenEventTypes.has(event.type)) return { items: [] };
   const id = `event:${event.seq}`;
   switch (event.type) {
     case "user/message":
-      return { items: messageItem(id, "user_message", textFromMessage(event.data)) };
+      if (!humanMessage(event.data)) return { items: [] };
+      return { items: userMessageItems(id, event.data) };
+    case "request/context":
+      return contextWindow(event.data);
     case "assistant/message":
       return assistantMessage(id, event.data);
     case "tool/call":
@@ -101,25 +189,52 @@ function assistantMessage(id: string, data: unknown): MappedEvent {
   const message = isRecord(data) ? data.message : data;
   const text = textFromMessage(message);
   const items: ProviderTimelineItem[] = [];
-  if (text.text) items.push(timelineMessage(id, "assistant_message", text.text));
-  if (text.reasoning) {
-    items.push({ type: "reasoning", id: `${id}:reasoning`, text: text.reasoning });
+  const messageText = meaningful(text.text);
+  const reasoningText = meaningful(text.reasoning);
+  if (messageText) items.push(timelineMessage(id, "assistant_message", messageText));
+  if (reasoningText) {
+    items.push({ type: "reasoning", id: `${id}:reasoning`, text: reasoningText });
   }
   const usage = isRecord(data) ? usageFrom(data.usage) : undefined;
   return { items, ...(usage ? { usage } : {}) };
 }
 
-function messageItem(
-  id: string,
-  type: "user_message" | "assistant_message",
-  text: { text: string; reasoning: string },
-): ProviderTimelineItem[] {
+function humanMessage(data: unknown): boolean {
+  if (!isRecord(data)) return false;
+  const source = data.source;
+  if (!isRecord(source) || typeof source.kind !== "string") return true;
+  return source.kind === "user";
+}
+
+function userMessageItems(id: string, data: unknown): ProviderTimelineItem[] {
+  const text = textFromMessage(data);
   const items: ProviderTimelineItem[] = [];
-  if (text.text) items.push(timelineMessage(id, type, text.text));
-  if (text.reasoning)
-    items.push({ type: "reasoning", id: `${id}:reasoning`, text: text.reasoning });
-  if (items.length === 0) items.push(pluginItem(id, "dsh-event", { type, data: text }));
+  const messageText = meaningful(text.text);
+  const reasoningText = meaningful(text.reasoning);
+  if (messageText) {
+    const clientMessageId = rpcId(data);
+    items.push({
+      type: "user_message",
+      id,
+      text: messageText,
+      ...(clientMessageId ? { clientMessageId } : {}),
+    });
+  }
+  if (reasoningText) {
+    items.push({ type: "reasoning", id: `${id}:reasoning`, text: reasoningText });
+  }
   return items;
+}
+
+function rpcId(data: unknown): string | undefined {
+  if (!isRecord(data) || !isRecord(data.source)) return undefined;
+  return typeof data.source.rpcId === "string" ? data.source.rpcId : undefined;
+}
+
+function contextWindow(data: unknown): MappedEvent {
+  if (!isRecord(data) || typeof data.contextWindow !== "number") return { items: [] };
+  if (!Number.isFinite(data.contextWindow) || data.contextWindow <= 0) return { items: [] };
+  return { items: [], usage: { contextWindowMaxTokens: data.contextWindow } };
 }
 
 function timelineMessage(
@@ -135,14 +250,15 @@ function toolCallItem(data: unknown, fallbackId: string): ProviderTimelineItem {
   const callId = typeof record.callId === "string" ? record.callId : fallbackId;
   const name = typeof record.name === "string" ? record.name : "tool";
   const args = typeof record.arguments === "string" ? record.arguments : "";
+  const skillName = name === "skill" ? stringField(parseJson(args), "name") : undefined;
   return {
     type: "tool_call",
     id: `tool:${callId}`,
     callId,
-    name,
+    name: skillName ?? name,
     status: "running",
     error: null,
-    detail: toolDetail(name, args),
+    detail: skillName ? { type: "plain_text", label: skillName } : toolDetail(name, args),
   };
 }
 
@@ -155,7 +271,10 @@ function toolResultItem(data: unknown, fallbackId: string): ProviderTimelineItem
   const errorText = isRecord(record.error)
     ? (firstString(record.error.reason, record.error.message) ?? "Tool failed")
     : text || "Tool failed";
-  const name = typeof record.name === "string" ? record.name : "tool";
+  const named = typeof record.name === "string" ? record.name : "tool";
+  const presented = presentedResult(text);
+  const name = presented?.name ?? named;
+  const detail = presented?.detail ?? { type: "unknown" as const, input: null, output: text };
   if (failed) {
     return {
       type: "tool_call",
@@ -164,7 +283,7 @@ function toolResultItem(data: unknown, fallbackId: string): ProviderTimelineItem
       name,
       status: "failed",
       error: errorText,
-      detail: { type: "unknown", input: null, output: text },
+      detail,
     };
   }
   return {
@@ -174,8 +293,80 @@ function toolResultItem(data: unknown, fallbackId: string): ProviderTimelineItem
     name,
     status: "completed",
     error: null,
-    detail: { type: "unknown", input: null, output: text },
+    detail,
   };
+}
+
+function applyChunk(
+  state: LiveAttempt,
+  chunk: Record<string, unknown>,
+): { state: LiveAttempt; items: ProviderTimelineItem[] } {
+  const next = { ...state };
+  if (
+    (chunk.type === "text-delta" || chunk.type === "reasoning-delta") &&
+    typeof chunk.text === "string"
+  ) {
+    if (chunk.type === "text-delta") next.text += chunk.text;
+    else next.reasoning += chunk.text;
+  }
+  if (chunk.type === "block-end" && isRecord(chunk.block)) {
+    if (chunk.block.type === "text" && typeof chunk.block.text === "string")
+      next.text = chunk.block.text;
+    if (chunk.block.type === "reasoning" && typeof chunk.block.text === "string") {
+      next.reasoning = chunk.block.text;
+    }
+  }
+  const items: ProviderTimelineItem[] = [];
+  const text = meaningful(next.text);
+  const reasoning = meaningful(next.reasoning);
+  if (text)
+    items.push({ type: "assistant_message", id: liveItemId(state.attemptId, "assistant"), text });
+  if (reasoning) {
+    items.push({
+      type: "reasoning",
+      id: liveItemId(state.attemptId, "reasoning"),
+      text: reasoning,
+    });
+  }
+  return { state: next, items };
+}
+
+function presentedResult(text: string): { name: string; detail: ToolDetail } | undefined {
+  const profile = pluginProfile(text);
+  if (profile) return profile;
+  return skillBody(text);
+}
+
+function pluginProfile(text: string): { name: string; detail: ToolDetail } | undefined {
+  const parsed = parseJson(text);
+  if (!isRecord(parsed)) return undefined;
+  const plugin = stringField(parsed, "plugin");
+  const displayName =
+    stringField(parsed, "displayName") ?? stringField(parsed, "pluginDisplayName") ?? plugin;
+  if (!displayName) return undefined;
+  const version =
+    stringField(parsed, "pluginVersion") ??
+    stringField(parsed, "kernelVersion") ??
+    stringField(parsed, "version");
+  const identity = plugin && version ? `${plugin} ${version}` : plugin;
+  const lines = [
+    identity,
+    stringField(parsed, "engine"),
+    stringField(parsed, "targetArchitecture"),
+    stringField(parsed, "mode"),
+  ].filter((line): line is string => typeof line === "string" && line.length > 0);
+  return {
+    name: displayName,
+    detail: { type: "plain_text", label: lines[0] ?? displayName, text: lines.join("\n") },
+  };
+}
+
+function skillBody(text: string): { name: string; detail: ToolDetail } | undefined {
+  const matched = /^<skill_content name="([^"]+)">/.exec(text);
+  if (!matched?.[1]) return undefined;
+  const name = matched[1];
+  const body = text.replace(/^<skill_content[^>]*>\n?/, "").replace(/\n?<\/skill_content>\s*$/, "");
+  return { name, detail: { type: "plain_text", label: name, text: body } };
 }
 
 function toolDetail(name: string, args: string): ToolDetail {
@@ -252,6 +443,28 @@ function pluginItem(id: string, kind: string, data: unknown): ProviderTimelineIt
     version: 1,
     data: toJson(data),
   };
+}
+
+function meaningful(text: string): string | undefined {
+  const cleaned = text.replace(/\u200b/g, "");
+  if (!cleaned.trim()) return undefined;
+  return cleaned;
+}
+
+function outputOf(detail: ToolDetail): string {
+  if (detail.type === "unknown" && typeof detail.output === "string") return detail.output;
+  if (detail.type === "plain_text" && typeof detail.text === "string") return detail.text;
+  if (detail.type === "shell" && typeof detail.output === "string") return detail.output;
+  if (detail.type === "read" && typeof detail.content === "string") return detail.content;
+  return "";
+}
+
+function withOutput(detail: ToolDetail, output: string): ToolDetail {
+  if (!output) return detail;
+  if (detail.type === "shell") return { ...detail, output };
+  if (detail.type === "read") return { ...detail, content: output };
+  if (detail.type === "unknown") return { ...detail, output };
+  return detail;
 }
 
 function usageFrom(value: unknown): ProviderUsage | undefined {

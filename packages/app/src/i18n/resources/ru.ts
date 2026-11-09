@@ -460,6 +460,7 @@ export const ru: TranslationResources = {
     row: {
       importing: "Импортируется...",
     },
+    workspaces: en.importSession.workspaces,
   },
   workspace: {
     route: {

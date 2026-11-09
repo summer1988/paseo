@@ -1,13 +1,19 @@
 import React, { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Pressable, type PressableStateCallbackType, Text, View } from "react-native";
-import { keepPreviousData, useMutation, useQueries, useQueryClient } from "@tanstack/react-query";
+import {
+  keepPreviousData,
+  useMutation,
+  useQueries,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import type {
   DaemonClient,
   FetchRecentProviderSessionEntry,
 } from "@getpaseo/client/internal/daemon-client";
 import type { AgentProvider } from "@getpaseo/protocol/agent-types";
-import { ChevronDown, Inbox, Layers, RotateCw } from "lucide-react-native";
+import { Check, ChevronDown, Inbox, Layers, RotateCw } from "lucide-react-native";
 import { StyleSheet, useUnistyles } from "react-native-unistyles";
 import { AdaptiveModalSheet, type SheetHeader } from "@/components/adaptive-modal-sheet";
 import { Button } from "@/components/ui/button";
@@ -37,10 +43,18 @@ import {
   nextPageLimit,
   PER_PROVIDER_LIMIT,
   type ProviderErrorRow,
+  DSH_PLUGIN_ID,
+  DSH_PROVIDER_ID,
+  DSH_WORKSPACES_RPC,
+  type DshWorkspaceChoice,
+  filterDshWorkspaces,
+  parseDshWorkspaces,
   resolveImportTarget,
   resolveProvidersToFetch,
   requiresImportSessionsHostUpgrade,
   sumFilteredAlreadyImportedCount,
+  toggleWorkspaceId,
+  WORKSPACE_IMPORT_LIMIT,
 } from "@/components/import-session-sheet-view-model";
 
 const IMPORT_SHEET_SNAP_POINTS = ["70%", "92%"];
@@ -51,7 +65,9 @@ const SEARCH_DEBOUNCE_MS = 200;
 type RecentProviderSessionsClient = Pick<
   DaemonClient,
   "fetchRecentProviderSessions" | "importAgent"
->;
+> & {
+  invokePluginRpc?: DaemonClient["invokePluginRpc"];
+};
 
 type ImportedAgent = Awaited<ReturnType<RecentProviderSessionsClient["importAgent"]>>;
 
@@ -380,9 +396,11 @@ function hasListHeader(
   input: SheetStatusMessagesProps & {
     showFilter: boolean;
     hasProviderErrors: boolean;
+    showWorkspaceSection: boolean;
   },
 ): boolean {
   return (
+    input.showWorkspaceSection ||
     input.showFilter ||
     !input.isClientReady ||
     input.isSnapshotUnsupported ||
@@ -391,6 +409,10 @@ function hasListHeader(
     input.importErrored ||
     input.hasProviderErrors
   );
+}
+
+function importRowsDisabled(sessionPending: boolean, workspacePending: boolean): boolean {
+  return sessionPending || workspacePending;
 }
 
 function SessionRows({
@@ -484,6 +506,149 @@ function SessionRows({
   );
 }
 
+interface WorkspaceNotice {
+  kind: "already" | "failed" | "partial";
+  done: number;
+  failed: number;
+}
+
+function DshWorkspaceRow({
+  workspace,
+  selected,
+  pending,
+  onToggle,
+}: {
+  workspace: DshWorkspaceChoice;
+  selected: boolean;
+  pending: boolean;
+  onToggle: (id: string) => void;
+}) {
+  const { theme } = useUnistyles();
+  const { t } = useTranslation();
+  const handlePress = useCallback(() => {
+    onToggle(workspace.id);
+  }, [onToggle, workspace.id]);
+  const accessibilityState = useMemo(
+    () => ({ checked: selected, disabled: pending }),
+    [pending, selected],
+  );
+  const pressableStyle = useCallback(
+    ({ pressed, hovered = false }: PressableStateCallbackType & { hovered?: boolean }) => [
+      styles.workspaceRow,
+      Boolean(hovered) && styles.rowHovered,
+      pressed && styles.rowPressed,
+    ],
+    [],
+  );
+  const checkStyle = useMemo(
+    () => [styles.workspaceCheck, selected ? styles.workspaceCheckSelected : null],
+    [selected],
+  );
+  return (
+    <Pressable
+      onPress={handlePress}
+      disabled={pending}
+      accessibilityRole="checkbox"
+      accessibilityState={accessibilityState}
+      testID={`import-session-workspace-${workspace.id}`}
+      style={pressableStyle}
+    >
+      <View style={checkStyle}>
+        {selected ? <Check size={12} color={theme.colors.surface0} strokeWidth={2} /> : null}
+      </View>
+      <View style={styles.rowContent}>
+        <View style={styles.rowHeader}>
+          <Text style={styles.rowTitle} numberOfLines={1}>
+            {workspace.title}
+          </Text>
+          <Text style={styles.rowMeta}>
+            {t("importSession.workspaces.sessions", { count: workspace.sessionCount })}
+          </Text>
+        </View>
+        <Text style={styles.rowFolder} numberOfLines={1}>
+          {workspace.path}
+        </Text>
+      </View>
+    </Pressable>
+  );
+}
+
+function DshWorkspaceSection({
+  workspaces,
+  selectedIds,
+  loading,
+  unavailable,
+  pending,
+  progress,
+  notice,
+  onToggle,
+  onImport,
+}: {
+  workspaces: readonly DshWorkspaceChoice[];
+  selectedIds: ReadonlySet<string>;
+  loading: boolean;
+  unavailable: boolean;
+  pending: boolean;
+  progress: { done: number; total: number } | null;
+  notice: WorkspaceNotice | null;
+  onToggle: (id: string) => void;
+  onImport: () => void;
+}) {
+  const { theme } = useUnistyles();
+  const { t } = useTranslation();
+  const selectedCount = workspaces.filter((workspace) => selectedIds.has(workspace.id)).length;
+  let importLabel = t("importSession.workspaces.import");
+  if (pending) {
+    importLabel = t("importSession.workspaces.importing", {
+      done: progress?.done ?? 0,
+      total: progress?.total ?? 0,
+    });
+  }
+  let noticeText = "";
+  if (notice?.kind === "already") noticeText = t("importSession.workspaces.alreadyImported");
+  if (notice?.kind === "failed") noticeText = t("importSession.workspaces.failed");
+  if (notice?.kind === "partial") {
+    noticeText = t("importSession.workspaces.partial", {
+      done: notice.done,
+      failed: notice.failed,
+    });
+  }
+  return (
+    <View style={styles.workspaceSection} testID="import-session-workspaces">
+      <Text style={styles.workspaceHeading}>{t("importSession.workspaces.title")}</Text>
+      {loading ? (
+        <View style={styles.statusRow}>
+          <LoadingSpinner color={theme.colors.foregroundMuted} />
+          <Text style={styles.statusText}>{t("importSession.status.loading")}</Text>
+        </View>
+      ) : null}
+      {unavailable ? (
+        <Text style={styles.statusText}>{t("importSession.workspaces.unavailable")}</Text>
+      ) : null}
+      {workspaces.map((workspace) => (
+        <DshWorkspaceRow
+          key={workspace.id}
+          workspace={workspace}
+          selected={selectedIds.has(workspace.id)}
+          pending={pending}
+          onToggle={onToggle}
+        />
+      ))}
+      {workspaces.length > 0 ? (
+        <Button
+          variant="default"
+          onPress={onImport}
+          disabled={pending || selectedCount === 0}
+          testID="import-session-workspaces-import"
+        >
+          {importLabel}
+        </Button>
+      ) : null}
+      {noticeText ? <Text style={styles.statusText}>{noticeText}</Text> : null}
+    </View>
+  );
+}
+
 export function ImportSessionSheet({
   visible,
   client,
@@ -505,6 +670,14 @@ export function ImportSessionSheet({
   const [searchInput, setSearchInput] = useState("");
   const [pageLimit, setPageLimit] = useState(PER_PROVIDER_LIMIT);
   const [selectedProvider, setSelectedProvider] = useState<string>(ALL_FILTER_VALUE);
+  const [selectedWorkspaceIds, setSelectedWorkspaceIds] = useState<ReadonlySet<string>>(
+    () => new Set(),
+  );
+  const [workspaceNotice, setWorkspaceNotice] = useState<WorkspaceNotice | null>(null);
+  const [workspaceProgress, setWorkspaceProgress] = useState<{
+    done: number;
+    total: number;
+  } | null>(null);
 
   const scopeCwd = isShowingAllDirectories ? null : (cwd ?? null);
   const supportsSearch = useHostFeature(serverId, "importSessionSearch");
@@ -514,6 +687,8 @@ export function ImportSessionSheet({
     if (visible) return;
     setIsShowingAllDirectories(false);
     setSearchInput("");
+    setSelectedWorkspaceIds(new Set());
+    setWorkspaceNotice(null);
   }, [visible]);
 
   // A narrower or wider list starts at page one; keeping a grown limit would
@@ -537,6 +712,24 @@ export function ImportSessionSheet({
     () => (requiresHostUpgrade ? null : resolveProvidersToFetch(supportsSnapshot, snapshotEntries)),
     [requiresHostUpgrade, supportsSnapshot, snapshotEntries],
   );
+  const dshEnabled = providersToFetch?.includes(DSH_PROVIDER_ID) ?? false;
+  const workspaceQuery = useQuery({
+    queryKey: ["dsh-workspaces", serverId],
+    enabled: visible && dshEnabled && Boolean(client?.invokePluginRpc),
+    retry: false,
+    queryFn: async () => {
+      if (!client?.invokePluginRpc) return [];
+      return parseDshWorkspaces(
+        await client.invokePluginRpc(DSH_PLUGIN_ID, DSH_WORKSPACES_RPC, {}),
+      );
+    },
+  });
+  const dshWorkspaces = useMemo(
+    () => filterDshWorkspaces(workspaceQuery.data ?? [], query),
+    [query, workspaceQuery.data],
+  );
+  const showWorkspaceSection =
+    dshEnabled && (workspaceQuery.isLoading || workspaceQuery.isError || dshWorkspaces.length > 0);
 
   const providerLabelById = useMemo(
     () => buildProviderLabelMap(snapshotEntries),
@@ -723,6 +916,91 @@ export function ImportSessionSheet({
     [importMutation],
   );
 
+  const workspaceImport = useMutation({
+    mutationFn: async (workspaces: readonly DshWorkspaceChoice[]) => {
+      if (!client) throw new Error(t("workspace.terminal.hostDisconnected"));
+      const batches: FetchRecentProviderSessionEntry[] = [];
+      let failed = 0;
+      for (const workspace of workspaces) {
+        try {
+          const page = await client.fetchRecentProviderSessions({
+            cwd: workspace.path,
+            providers: [DSH_PROVIDER_ID],
+            limit: WORKSPACE_IMPORT_LIMIT,
+          });
+          if ((page.providerErrors?.length ?? 0) > 0 && page.entries.length === 0) {
+            failed += 1;
+            continue;
+          }
+          batches.push(...page.entries);
+        } catch {
+          failed += 1;
+        }
+      }
+      const imported: { agent: ImportedAgent; target: ReturnType<typeof resolveImportTarget> }[] =
+        [];
+      setWorkspaceProgress({ done: 0, total: batches.length });
+      let finished = 0;
+      for (const entry of batches) {
+        try {
+          if (!entry.cwd) throw new Error("Session is missing a working directory");
+          const target = resolveImportTarget({
+            entryCwd: entry.cwd,
+            workspaceCwd: cwd,
+            workspaceId,
+            isScopedListing: false,
+          });
+          const agent = await client.importAgent({
+            providerId: entry.providerId,
+            providerHandleId: entry.providerHandleId,
+            cwd: entry.cwd,
+            ...(target.workspaceId ? { workspaceId: target.workspaceId } : {}),
+          });
+          imported.push({ agent, target });
+        } catch {
+          failed += 1;
+        }
+        finished += 1;
+        setWorkspaceProgress({ done: finished, total: batches.length });
+      }
+      return { imported, failed };
+    },
+    onSuccess: ({ imported, failed }) => {
+      setWorkspaceProgress(null);
+      if (imported.length === 0 && failed === 0) {
+        setWorkspaceNotice({ kind: "already", done: 0, failed: 0 });
+        return;
+      }
+      if (failed > 0) {
+        setWorkspaceNotice({
+          kind: imported.length > 0 ? "partial" : "failed",
+          done: imported.length,
+          failed,
+        });
+      } else {
+        setWorkspaceNotice(null);
+      }
+      const last = imported.at(-1);
+      if (!last) return;
+      if (failed === 0) onClose();
+      if (last.target.crossWorkspace) onImported?.(last.agent);
+      else onImportedAgent?.(last.agent.id);
+      void queryClient.invalidateQueries({ queryKey: sessionsQueryRoot, refetchType: "none" });
+    },
+  });
+
+  const handleToggleWorkspace = useCallback((id: string) => {
+    setWorkspaceNotice(null);
+    setSelectedWorkspaceIds((current) => toggleWorkspaceId(current, id));
+  }, []);
+
+  const handleImportWorkspaces = useCallback(() => {
+    const selected = dshWorkspaces.filter((workspace) => selectedWorkspaceIds.has(workspace.id));
+    if (selected.length === 0) return;
+    setWorkspaceNotice(null);
+    workspaceImport.mutate(selected);
+  }, [dshWorkspaces, selectedWorkspaceIds, workspaceImport]);
+
   const providerErrorRows = useMemo(
     () => collectProviderErrorRows(providersToFetch, queries, providerLabelById),
     [queries, providersToFetch, providerLabelById],
@@ -808,6 +1086,7 @@ export function ImportSessionSheet({
   const showFilter = filterProviders.length > 1;
   const showLoadMore = hasMoreSessions(queries, pageLimit);
   const showListHeader = hasListHeader({
+    showWorkspaceSection,
     showFilter,
     isClientReady: Boolean(client),
     isSnapshotUnsupported,
@@ -821,6 +1100,19 @@ export function ImportSessionSheet({
     () =>
       showListHeader ? (
         <View style={styles.listHeaderContent}>
+          {showWorkspaceSection ? (
+            <DshWorkspaceSection
+              workspaces={dshWorkspaces}
+              selectedIds={selectedWorkspaceIds}
+              loading={workspaceQuery.isLoading}
+              unavailable={workspaceQuery.isError}
+              pending={workspaceImport.isPending}
+              progress={workspaceProgress}
+              notice={workspaceNotice}
+              onToggle={handleToggleWorkspace}
+              onImport={handleImportWorkspaces}
+            />
+          ) : null}
           {showFilter ? (
             <View ref={filterAnchorRef} collapsable={false} style={styles.filterTriggerWrap}>
               <Pressable
@@ -889,6 +1181,16 @@ export function ImportSessionSheet({
       importMutation.isError,
       providerErrorRows,
       handleRetryProvider,
+      showWorkspaceSection,
+      dshWorkspaces,
+      selectedWorkspaceIds,
+      workspaceQuery.isLoading,
+      workspaceQuery.isError,
+      workspaceImport.isPending,
+      workspaceProgress,
+      workspaceNotice,
+      handleToggleWorkspace,
+      handleImportWorkspaces,
     ],
   );
   const listFooter = useMemo(
@@ -920,7 +1222,7 @@ export function ImportSessionSheet({
       listFooter={listFooter}
       serverId={serverId}
       entries={visibleEntries}
-      disabled={importMutation.isPending}
+      disabled={importRowsDisabled(importMutation.isPending, workspaceImport.isPending)}
       importingSessionKey={importingSessionKey}
       resolveFolder={resolveFolder}
       onImportSession={handleImportSession}
@@ -987,6 +1289,37 @@ const styles = StyleSheet.create((theme) => ({
   },
   listHeaderContent: {
     gap: theme.spacing[4],
+  },
+  workspaceSection: {
+    gap: theme.spacing[2],
+  },
+  workspaceHeading: {
+    color: theme.colors.foreground,
+    fontSize: theme.fontSize.sm,
+    fontWeight: theme.fontWeight.medium,
+  },
+  workspaceRow: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    gap: theme.spacing[2],
+    paddingVertical: theme.spacing[2],
+    paddingHorizontal: theme.spacing[2],
+    marginHorizontal: -theme.spacing[2],
+    borderRadius: theme.borderRadius.lg,
+  },
+  workspaceCheck: {
+    width: 16,
+    height: 16,
+    marginTop: 2,
+    borderRadius: theme.borderRadius.md,
+    borderWidth: theme.borderWidth[1],
+    borderColor: theme.colors.border,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  workspaceCheckSelected: {
+    backgroundColor: theme.colors.foreground,
+    borderColor: theme.colors.foreground,
   },
   smallList: {
     gap: theme.spacing[1],

@@ -32,3 +32,17 @@ export const attachInstall = defineRpc({
   }),
   output: z.object({ ready: z.literal(true) }),
 });
+
+export const workspaceSchema = z.object({
+  id: z.string().min(1),
+  title: z.string().min(1),
+  path: z.string().min(1),
+  updatedAt: z.string().min(1),
+  sessionCount: z.number().int().nonnegative(),
+});
+
+export const listWorkspaces = defineRpc({
+  name: "dsh.workspaces.list",
+  input: z.object({}),
+  output: z.object({ workspaces: z.array(workspaceSchema) }),
+});

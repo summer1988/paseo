@@ -461,6 +461,7 @@ export const es: TranslationResources = {
     row: {
       importing: "Importador...",
     },
+    workspaces: en.importSession.workspaces,
   },
   workspace: {
     route: {

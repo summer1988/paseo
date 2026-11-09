@@ -172,6 +172,11 @@ function SettingsContent({
 const ThemedSettingsContent = withUnistyles(SettingsContent);
 // Settings routes carry no screen params.
 const themeMapping = (theme: Theme) => ({ theme: toPluginTheme(theme) });
+
+/** One registered settings screen, without the Plugins-page chrome. */
+export function PluginSettingsSurface(identity: SettingsIdentity) {
+  return <ThemedSettingsContent {...identity} uniProps={themeMapping} />;
+}
 export function PluginSettingsContent({
   onBackToPlugins,
   showBackToPlugins,

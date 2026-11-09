@@ -12,8 +12,12 @@ export class DshError extends Error {
 
 export interface DshCaller {
   call(endpoint: string, args: Record<string, unknown>): Promise<unknown>;
+  /** Resolves when the saved host accepts a connection. */
+  ping(): Promise<void>;
   listen(onItem: (value: unknown) => void): () => void;
   follow(sessionId: string, onItem: (value: unknown) => void): () => void;
+  /** Resolves with the first stream item, then cancels. */
+  first(endpoint: string, args: Record<string, unknown>): Promise<unknown>;
   close(): Promise<void>;
 }
 
@@ -49,14 +53,25 @@ export async function exchangeLogin(
   fetchImpl: typeof fetch = fetch,
 ): Promise<{ origin: string; cookie: string }> {
   const url = assertLoopbackLogin(loginUrl);
-  const connect = new URL("/connect", url.origin);
-  connect.searchParams.set("token", url.searchParams.get("token") ?? "");
-  connect.searchParams.set("interactions", "answer");
+  // GET /?token= mints the browser-session cookie (303). /connect mints an operator
+  // cookie whose peer is deleted when its mux socket closes, so the next /api call is 401.
+  const index = new URL("/", url.origin);
+  index.searchParams.set("token", url.searchParams.get("token") ?? "");
   let response: Response;
   try {
-    response = await fetchImpl(connect, { redirect: "manual" });
+    response = await fetchImpl(index, { redirect: "manual" });
   } catch (error) {
-    throw new DshError("login", error instanceof Error ? error.message : "Login exchange failed");
+    if (!isTransportError(error)) {
+      throw new DshError("login", error instanceof Error ? error.message : "Login exchange failed");
+    }
+    try {
+      response = await fetchAgain(fetchImpl, index, { redirect: "manual" });
+    } catch (retryError) {
+      throw new DshError("login", describeTransport(retryError));
+    }
+  }
+  if (response.status !== 303) {
+    throw new DshError("login", "The host rejected the login link");
   }
   const cookie = cookieHeader(response);
   if (!cookie) throw new DshError("login", "The host did not return an authentication cookie");
@@ -126,16 +141,31 @@ export function createRemoteClient(options: {
 
   return {
     async call(endpoint, args) {
-      const response = await fetchImpl(new URL(`/api/${endpoint}`, options.origin), {
+      const rpcId = globalThis.crypto.randomUUID();
+      const response = await request(fetchImpl, new URL(`/api/${endpoint}`, options.origin), {
         method: "POST",
         headers: {
           "content-type": "application/json",
           cookie: options.cookie,
         },
-        body: JSON.stringify({ args }),
+        body: JSON.stringify({
+          type: "client-request",
+          rpcId,
+          method: endpoint,
+          payload: { args },
+        }),
       });
       const body: unknown = await response.json().catch(() => undefined);
-      return unwrap(body, response.status);
+      return unwrap(body, response.status, rpcId);
+    },
+    async ping() {
+      // Any HTTP response means the process is accepting connections. A thrown
+      // fetch is the host being down, which is what the catalog error was hiding.
+      await request(fetchImpl, new URL("/", options.origin), {
+        method: "GET",
+        headers: { cookie: options.cookie },
+        redirect: "manual",
+      });
     },
     listen(onItem) {
       return open("$events", {}, onItem);
@@ -144,12 +174,41 @@ export function createRemoteClient(options: {
       return open(
         "session/follow",
         {
-          address: { kind: "session", sessionId },
-          activate: true,
-          assistantStream: true,
+          request: {
+            address: { kind: "session", sessionId },
+            activate: true,
+            assistantStream: true,
+          },
         },
         onItem,
       );
+    },
+    first(endpoint, args) {
+      return new Promise((resolve, reject) => {
+        let settled = false;
+        const timer = setTimeout(() => {
+          finish(new DshError("stream", "The host did not send a workspace list"));
+        }, 15_000);
+        const stop = open(endpoint, args, (value) => {
+          if (isRecord(value) && value.type === "error" && value.error instanceof Error) {
+            finish(value.error);
+            return;
+          }
+          if (isRecord(value) && value.type === "end") {
+            finish(new DshError("stream", "The host closed the workspace list"));
+            return;
+          }
+          finish(undefined, value);
+        });
+        function finish(error?: Error, value?: unknown) {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          stop();
+          if (error) reject(error);
+          else resolve(value);
+        }
+      });
     },
     async close() {
       socket.close();
@@ -162,19 +221,118 @@ function openMux(origin: string, cookie: string): SocketLike {
   return socket;
 }
 
-function loadWebSocket(): new (
+type WebSocketConstructor = new (
   url: string | URL,
   options?: { headers?: Record<string, string> },
-) => SocketLike {
+) => SocketLike;
+
+function loadWebSocket(): WebSocketConstructor {
+  // node:undici is not exposed by getBuiltinModule on Node 24/26 or Electron.
+  // The process global is undici's WebSocket and accepts the cookie header.
+  const globalSocket = (globalThis as { WebSocket?: unknown }).WebSocket;
+  if (typeof globalSocket === "function") return globalSocket as WebSocketConstructor;
   const load = (process as { getBuiltinModule?: (name: string) => unknown }).getBuiltinModule;
   const builtin = load?.("node:undici");
   if (!isRecord(builtin) || typeof builtin.WebSocket !== "function") {
     throw new DshError("socket", "WebSocket is unavailable");
   }
-  return builtin.WebSocket as new (
-    url: string | URL,
-    options?: { headers?: Record<string, string> },
-  ) => SocketLike;
+  return builtin.WebSocket as WebSocketConstructor;
+}
+
+type FetchInit = Parameters<typeof fetch>[1];
+
+async function request(fetchImpl: typeof fetch, input: URL, init: FetchInit): Promise<Response> {
+  try {
+    return await fetchImpl(input, init);
+  } catch (error) {
+    if (!isTransportError(error)) throw error;
+    try {
+      return await fetchAgain(fetchImpl, input, init);
+    } catch (retryError) {
+      throw new DshError("transport", describeTransport(retryError));
+    }
+  }
+}
+
+async function fetchAgain(fetchImpl: typeof fetch, input: URL, init: FetchInit): Promise<Response> {
+  if (fetchImpl !== fetch) return fetchImpl(input, init);
+  const isolated = openIsolatedFetch();
+  if (!isolated) return fetchImpl(input, init);
+  try {
+    return await isolated.fetch(input, init);
+  } finally {
+    await isolated.close();
+  }
+}
+
+function openIsolatedFetch():
+  | { fetch: (input: URL, init?: FetchInit) => Promise<Response>; close: () => Promise<void> }
+  | undefined {
+  const load = (process as { getBuiltinModule?: (name: string) => unknown }).getBuiltinModule;
+  const builtin = load?.("node:undici");
+  if (
+    !isRecord(builtin) ||
+    typeof builtin.Agent !== "function" ||
+    typeof builtin.fetch !== "function"
+  ) {
+    return undefined;
+  }
+  try {
+    const agent = new (builtin.Agent as new (options: {
+      connections: number;
+      pipelining: number;
+    }) => { close: () => Promise<void> })({ connections: 1, pipelining: 0 });
+    const undiciFetch = builtin.fetch as (
+      input: URL,
+      init?: FetchInit & { dispatcher?: unknown },
+    ) => Promise<Response>;
+    return {
+      fetch: (input, init) => undiciFetch(input, { ...init, dispatcher: agent }),
+      close: () => agent.close(),
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+function isTransportError(error: unknown): boolean {
+  return error instanceof TypeError || (error instanceof Error && error.message === "fetch failed");
+}
+
+/** A stable sentence. Cause messages repeat the address, so they stay off the diagnostic. */
+function describeTransport(error: unknown): string {
+  const code = nestedCode(error);
+  if (
+    code === "ECONNREFUSED" ||
+    code === "ENOTFOUND" ||
+    code === "EHOSTUNREACH" ||
+    code === "ECONNABORTED"
+  ) {
+    return "The saved host is not accepting connections";
+  }
+  if (
+    code === "ECONNRESET" ||
+    code === "EPIPE" ||
+    code === "UND_ERR_SOCKET" ||
+    code === "UND_ERR_CLOSED"
+  ) {
+    return "The host connection was interrupted";
+  }
+  if (
+    code === "UND_ERR_CONNECT_TIMEOUT" ||
+    code === "UND_ERR_HEADERS_TIMEOUT" ||
+    code === "UND_ERR_BODY_TIMEOUT" ||
+    code === "ABORT_ERR"
+  ) {
+    return "The host did not respond in time";
+  }
+  return "The host could not be reached";
+}
+
+function nestedCode(error: unknown, depth = 0): string | undefined {
+  if (depth > 3 || !isRecord(error)) return undefined;
+  if (typeof error.code === "string") return error.code;
+  return nestedCode(error.cause, depth + 1);
 }
 
 function cookieHeader(response: Response): string | undefined {
@@ -190,7 +348,10 @@ function cookieHeader(response: Response): string | undefined {
   return pairs.length > 0 ? pairs.join("; ") : undefined;
 }
 
-function unwrap(body: unknown, status: number): unknown {
+function unwrap(body: unknown, status: number, rpcId: string): unknown {
+  if (isRecord(body) && body.type === "server-response" && body.rpcId !== rpcId) {
+    throw new DshError("remote", "The host response did not match the request");
+  }
   const result = isRecord(body) && isRecord(body.result) ? body.result : body;
   if (isRecord(result) && result.ok === false && isRecord(result.error)) {
     throw new DshError(

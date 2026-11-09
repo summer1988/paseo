@@ -9,6 +9,7 @@ import {
   expectCreateProfileFromModelRow,
   expectComposerModel,
   expectModelRowProfileActionBesideRow,
+  drillIntoProvider,
   expectModelRowSelected,
   expectProfileEditIsPencilOnly,
   expectProfileVisibleForProvider,
@@ -74,11 +75,11 @@ test.describe("Agent profiles in the model picker", () => {
         await expectComposerMode(page, "Load test");
       });
 
-      await test.step("the sole provider opens directly", async () => {
+      await test.step("the provider list keeps the pinned profile above it", async () => {
         await openModelPicker(page);
         await expect(page.getByTestId("model-search-input").first()).toBeVisible();
         await expect(page.getByTestId("sheet-header-back")).toHaveCount(0);
-        await expect(page.locator('[data-testid^="model-provider-"]')).toHaveCount(0);
+        await expect(page.getByTestId("model-provider-mock")).toBeVisible();
         await expectProfileVisibleForProvider(page, {
           name: PROFILE.name,
           summary: PROFILE_SUMMARY,
@@ -103,13 +104,14 @@ test.describe("Agent profiles in the model picker", () => {
         await expectComposerDoesNotName(page, PROFILE.name);
       });
 
-      await test.step("reopening returns directly to the provider models", async () => {
+      await test.step("reopening returns to the provider list", async () => {
         await openModelPicker(page);
         await expect(page.getByTestId("model-search-input").first()).toBeVisible();
         await expectProfileVisibleForProvider(page, {
           name: PROFILE.name,
           summary: PROFILE_SUMMARY,
         });
+        await drillIntoProvider(page, "mock");
         await expectModelRowSelected(page, { provider: "mock", modelId: "one-minute-stream" });
         await closeModelPicker(page);
       });
@@ -137,10 +139,12 @@ test.describe("Agent profiles in the model picker", () => {
       await openAgentRoute(page, workspace);
       await expectComposerVisible(page);
       await openModelPicker(page);
+      await drillIntoProvider(page, "mock");
       await expectModelRowProfileActionBesideRow(page, oneMinute);
       await expectCreateProfileFromModelRow(page, oneMinute);
       await expectComposerModel(page, "Ten second stream");
       await openModelPicker(page);
+      await drillIntoProvider(page, "mock");
       await selectModelRow(page, oneMinute);
       await expectComposerModel(page, oneMinute.modelLabel);
     } finally {

@@ -1,4 +1,5 @@
 import { getPaseoToolActionLabel } from "@getpaseo/protocol/paseo-tool-presentation/index";
+import { thinkingPreviewLine } from "@getpaseo/protocol/tool-call-display";
 import { isTurnTrigger } from "@/agent-stream/turn-membership";
 
 import { describeToolCall, type GroupableItem, type ToolCallRun } from "../grouping";
@@ -69,6 +70,27 @@ export function summarizeToolCalls(calls: readonly GroupableItem[]): OverviewSum
     otherToolCount,
     paseoActions,
   };
+}
+
+/** A group of only reasoning shows that reasoning's latest line beside "Thought". */
+export function thoughtOnlyPreview(group: OverviewToolCallGroup): string | undefined {
+  const { summary } = group;
+  if (
+    summary.thoughtCount === 0 ||
+    summary.editedFileCount > 0 ||
+    summary.commandCount > 0 ||
+    summary.readFileCount > 0 ||
+    summary.searchCount > 0 ||
+    summary.otherToolCount > 0 ||
+    Object.keys(summary.paseoActions).length > 0
+  ) {
+    return undefined;
+  }
+  for (let index = group.run.calls.length - 1; index >= 0; index -= 1) {
+    const call = group.run.calls[index];
+    if (call?.kind === "thought") return thinkingPreviewLine(call.text);
+  }
+  return undefined;
 }
 
 export function buildOverviewGroup(run: ToolCallRun): OverviewToolCallGroup {

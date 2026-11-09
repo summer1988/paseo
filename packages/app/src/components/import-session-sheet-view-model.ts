@@ -290,3 +290,58 @@ export function computeEmptyState(input: EmptyStateInputs): {
   }
   return { showEmptyState, emptyStateTitle: i18n.t("importSession.empty.noRecent") };
 }
+
+/** Import page size. One workspace fetch cannot ask for more. */
+export const WORKSPACE_IMPORT_LIMIT = 200;
+export const DSH_PROVIDER_ID = "dsh";
+export const DSH_PLUGIN_ID = "dsh-provider";
+export const DSH_WORKSPACES_RPC = "dsh.workspaces.list";
+
+export interface DshWorkspaceChoice {
+  id: string;
+  title: string;
+  path: string;
+  updatedAt: string;
+  sessionCount: number;
+}
+
+export function parseDshWorkspaces(value: unknown): DshWorkspaceChoice[] {
+  if (!isRecord(value) || !Array.isArray(value.workspaces)) return [];
+  return value.workspaces.flatMap((entry) => {
+    if (!isRecord(entry)) return [];
+    if (typeof entry.id !== "string" || typeof entry.path !== "string") return [];
+    if (typeof entry.title !== "string" || typeof entry.updatedAt !== "string") return [];
+    if (typeof entry.sessionCount !== "number" || entry.sessionCount <= 0) return [];
+    return [
+      {
+        id: entry.id,
+        title: entry.title,
+        path: entry.path,
+        updatedAt: entry.updatedAt,
+        sessionCount: entry.sessionCount,
+      },
+    ];
+  });
+}
+
+export function filterDshWorkspaces(
+  workspaces: readonly DshWorkspaceChoice[],
+  query: string,
+): DshWorkspaceChoice[] {
+  const needle = query.trim().toLowerCase();
+  if (!needle) return [...workspaces];
+  return workspaces.filter((workspace) =>
+    `${workspace.title}\n${workspace.path}`.toLowerCase().includes(needle),
+  );
+}
+
+export function toggleWorkspaceId(selected: ReadonlySet<string>, id: string): Set<string> {
+  const next = new Set(selected);
+  if (next.has(id)) next.delete(id);
+  else next.add(id);
+  return next;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}

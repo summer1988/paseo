@@ -75,12 +75,13 @@ export function resolveModelBrowserAllView({
   return { kind: "searchResults", rows };
 }
 
-/** Where the picker lands when it opens. A sole provider skips the redundant root view. */
+/**
+ * Where the picker lands when it opens.
+ * A sole provider skips the redundant root. Several providers open on the
+ * provider list, so a ready provider is visible without a back step.
+ */
 export function resolveInitialModelBrowserView({
   providers,
-  selectedProvider,
-  selectedModel,
-  hasProfiles,
 }: {
   providers: ProviderSelectorProvider[];
   selectedProvider: string;
@@ -94,17 +95,6 @@ export function resolveInitialModelBrowserView({
       providerId: singleProvider.id,
       providerLabel: singleProvider.label,
     };
-  }
-
-  if (hasProfiles) {
-    return { kind: "all" };
-  }
-
-  if (selectedProvider.length > 0 && selectedModel.length > 0) {
-    const provider = providers.find((entry) => entry.id === selectedProvider);
-    if (provider) {
-      return { kind: "provider", providerId: provider.id, providerLabel: provider.label };
-    }
   }
 
   return { kind: "all" };

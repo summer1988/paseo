@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import type { FetchRecentProviderSessionEntry } from "@getpaseo/client/internal/daemon-client";
 import {
+  filterDshWorkspaces,
+  parseDshWorkspaces,
+  toggleWorkspaceId,
   aggregateSessionEntries,
   ALL_FILTER_VALUE,
   buildProviderLabelMap,
@@ -464,5 +467,33 @@ describe("computeEmptyState", () => {
       aggregatedCount: 1,
     });
     expect(result.emptyStateTitle).toBe("No z-ai sessions found.");
+  });
+});
+
+describe("dsh workspace choices", () => {
+  it("keeps workspaces that still have sessions and filters by title or path", () => {
+    const workspaces = parseDshWorkspaces({
+      workspaces: [
+        {
+          id: "w1",
+          title: "Demo",
+          path: "/work/demo",
+          updatedAt: "2026-11-09T00:00:00.000Z",
+          sessionCount: 2,
+        },
+        {
+          id: "empty",
+          title: "Empty",
+          path: "/empty",
+          updatedAt: "2026-11-09T00:00:00.000Z",
+          sessionCount: 0,
+        },
+        { id: "bad" },
+      ],
+    });
+    expect(workspaces.map((workspace) => workspace.id)).toEqual(["w1"]);
+    expect(filterDshWorkspaces(workspaces, "DEMO")).toEqual(workspaces);
+    expect(filterDshWorkspaces(workspaces, "/missing")).toEqual([]);
+    expect(toggleWorkspaceId(new Set(["w1"]), "w1").has("w1")).toBe(false);
   });
 });

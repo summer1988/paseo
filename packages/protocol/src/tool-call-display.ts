@@ -127,6 +127,23 @@ function buildCanonicalDetailDisplay(input: ToolCallDisplayInput): DetailDisplay
   }
 }
 
+const THINKING_PREVIEW_LIMIT = 160;
+
+/** The latest non-empty thinking line, short enough for the badge beside the label. */
+export function thinkingPreviewLine(text: string): string | undefined {
+  let latest = "";
+  for (const line of text.split(/\r?\n/)) {
+    const collapsed = line
+      .replace(/\u200b/g, "")
+      .replace(/\s+/g, " ")
+      .trim();
+    if (collapsed) latest = collapsed;
+  }
+  if (!latest) return undefined;
+  if (latest.length <= THINKING_PREVIEW_LIMIT) return latest;
+  return `...${latest.slice(-(THINKING_PREVIEW_LIMIT - 3))}`;
+}
+
 function buildUnknownDetailOverride(input: ToolCallDisplayInput): DetailDisplay {
   const lowerName = input.name.trim().toLowerCase();
   if (input.detail.type === "unknown" && lowerName === "task") {
@@ -136,8 +153,11 @@ function buildUnknownDetailOverride(input: ToolCallDisplayInput): DetailDisplay 
     };
   }
   if (input.detail.type === "unknown" && lowerName === "thinking") {
+    const preview =
+      typeof input.detail.input === "string" ? thinkingPreviewLine(input.detail.input) : undefined;
     return {
       displayName: "Thinking",
+      ...(preview ? { summary: preview } : {}),
     };
   }
   if (lowerName === "terminal") {

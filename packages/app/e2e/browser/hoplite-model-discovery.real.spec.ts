@@ -55,7 +55,6 @@ async function openWorkspaceModels(page: Page, workspaceId: string): Promise<voi
   await expectComposerVisible(page);
   await expectComposerFocused(page);
   await openModelPicker(page);
-  await page.getByTestId("sheet-header-back").click();
   await drillIntoProvider(page, "hoplite");
 }
 

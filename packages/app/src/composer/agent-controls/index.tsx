@@ -39,6 +39,7 @@ import { useProvidersSnapshot } from "@/hooks/use-providers-snapshot";
 import { resolveProviderDefinition } from "@/utils/provider-definitions";
 import { mergeProviderPreferences, useFormPreferences } from "@/hooks/use-form-preferences";
 import { Combobox, ComboboxItem, type ComboboxOption } from "@/components/ui/combobox";
+import { acceptsModelSelection } from "@/composer/agent-controls/model-sheet-flow";
 import {
   AgentModeControl,
   useLiveAgentModeControl,
@@ -124,6 +125,7 @@ interface ControlledAgentControlsProps {
   selectedModelId?: string;
   onSelectModel?: (modelId: string) => void;
   onSelectProviderAndModel?: (provider: string, modelId: string) => void;
+  onRememberProviderModel?: (provider: string, modelId: string) => void;
   thinkingOptions?: AgentControlOption[];
   selectedThinkingOptionId?: string;
   onSelectThinkingOption?: (thinkingOptionId: string) => void;
@@ -368,15 +370,25 @@ function pickSheetModel({
   onSelectProviderAndModel?: (provider: string, modelId: string) => void;
   onSelectProvider?: (providerId: string) => void;
   onSelectModel?: (modelId: string) => void;
-}) {
+}): boolean {
   if (onSelectProviderAndModel) {
     onSelectProviderAndModel(nextProviderId, modelId);
-    return;
+    return true;
+  }
+  if (
+    !acceptsModelSelection({
+      nextProviderId,
+      currentProvider,
+      canRetarget: Boolean(onSelectProvider),
+    })
+  ) {
+    return false;
   }
   if (nextProviderId !== currentProvider) {
     onSelectProvider?.(nextProviderId);
   }
   onSelectModel?.(modelId);
+  return true;
 }
 
 function pickDesktopModel({
@@ -391,14 +403,16 @@ function pickDesktopModel({
   currentProvider: string;
   onSelectModel?: (modelId: string) => void;
   onSelectProviderAndModel?: (provider: string, modelId: string) => void;
-}) {
+}): boolean {
   if (onSelectProviderAndModel) {
     onSelectProviderAndModel(nextProviderId, modelId);
-    return;
+    return true;
   }
-  if (nextProviderId === currentProvider) {
-    onSelectModel?.(modelId);
+  if (!acceptsModelSelection({ nextProviderId, currentProvider, canRetarget: false })) {
+    return false;
   }
+  onSelectModel?.(modelId);
+  return true;
 }
 
 type AgentControlsSlice = {
@@ -499,6 +513,7 @@ function ControlledAgentControls({
   selectedModelId,
   onSelectModel,
   onSelectProviderAndModel,
+  onRememberProviderModel,
   thinkingOptions,
   selectedThinkingOptionId,
   onSelectThinkingOption,
@@ -703,15 +718,16 @@ function ControlledAgentControls({
 
   const handleDesktopModelSelect = useCallback(
     (nextProviderId: string, modelId: string) => {
-      pickDesktopModel({
+      const applied = pickDesktopModel({
         nextProviderId,
         modelId,
         currentProvider: provider,
         onSelectModel,
         onSelectProviderAndModel,
       });
+      if (!applied) onRememberProviderModel?.(nextProviderId, modelId);
     },
-    [onSelectModel, onSelectProviderAndModel, provider],
+    [onRememberProviderModel, onSelectModel, onSelectProviderAndModel, provider],
   );
 
   const providerPressableStyle = useMemo(
@@ -745,7 +761,7 @@ function ControlledAgentControls({
 
   const handleSheetModelSelect = useCallback(
     (nextProviderId: string, modelId: string) => {
-      pickSheetModel({
+      const applied = pickSheetModel({
         nextProviderId,
         modelId,
         currentProvider: provider,
@@ -753,8 +769,9 @@ function ControlledAgentControls({
         onSelectProvider,
         onSelectModel,
       });
+      if (!applied) onRememberProviderModel?.(nextProviderId, modelId);
     },
-    [onSelectModel, onSelectProvider, onSelectProviderAndModel, provider],
+    [onRememberProviderModel, onSelectModel, onSelectProvider, onSelectProviderAndModel, provider],
   );
 
   if (!hasAnyControl) {
@@ -1624,6 +1641,8 @@ export const AgentControls = memo(function AgentControls({
     [agent?.provider, models],
   );
   const agentModelSelectorProviders = useMemo(() => {
+    const providers = buildSelectableProviderSelectorProviders(snapshotEntries);
+    if (providers.length > 0) return providers;
     if (snapshotSelectedEntry) {
       return buildSelectableProviderSelectorProviders([snapshotSelectedEntry]);
     }
@@ -1631,7 +1650,7 @@ export const AgentControls = memo(function AgentControls({
       providerDefinitions: agentProviderDefinitions,
       modelsByProvider: agentProviderModels,
     });
-  }, [agentProviderDefinitions, agentProviderModels, snapshotSelectedEntry]);
+  }, [agentProviderDefinitions, agentProviderModels, snapshotEntries, snapshotSelectedEntry]);
 
   const modelSelection = resolveAgentModelSelection({
     models,
@@ -1676,13 +1695,40 @@ export const AgentControls = memo(function AgentControls({
     },
     [agentId, agentProvider, client, toast, updatePreferences],
   );
+  const handleRememberProviderModel = useCallback(
+    (nextProvider: string, modelId: string) => {
+      void updatePreferences((current) =>
+        mergeProviderPreferences({
+          preferences: current,
+          provider: nextProvider as AgentProvider,
+          updates: { model: modelId },
+        }),
+      ).catch((error) => {
+        console.warn("[AgentControls] persist provider model failed", error);
+        toast.error(toErrorMessage(error));
+      });
+    },
+    [toast, updatePreferences],
+  );
   const handleSelectCommandCenterModel = useCallback(
-    (_provider: AgentProvider, modelId: string) => handleSelectModel(modelId),
-    [handleSelectModel],
+    (nextProvider: AgentProvider, modelId: string) => {
+      if (
+        !acceptsModelSelection({
+          nextProviderId: nextProvider,
+          currentProvider: agentProvider ?? "",
+          canRetarget: false,
+        })
+      ) {
+        handleRememberProviderModel(nextProvider, modelId);
+        return;
+      }
+      handleSelectModel(modelId);
+    },
+    [agentProvider, handleRememberProviderModel, handleSelectModel],
   );
 
   // A running agent is one provider's process, so only that provider's profiles
-  // can apply to it.
+  // can apply to it. The model menu still lists every enabled provider.
   const profileProviders = useMemo(() => (agentProvider ? [agentProvider] : []), [agentProvider]);
   const profileModeIds = useMemo(
     () => resolveSnapshotModeIds(snapshotSelectedEntry),
@@ -1832,6 +1878,7 @@ export const AgentControls = memo(function AgentControls({
         modelOptions={modelOptions}
         selectedModelId={modelSelection.activeModelId ?? undefined}
         onSelectModel={handleSelectModel}
+        onRememberProviderModel={handleRememberProviderModel}
         agentProfiles={agentProfiles}
         onApplyAgentProfile={agentProfiles?.applyProfile}
         onEditAgentProfiles={handleEditAgentProfiles}

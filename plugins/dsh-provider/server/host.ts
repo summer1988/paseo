@@ -38,6 +38,8 @@ export function defaultHostControls(): HostControls {
 export class HostPool {
   private owned: { id: string; host: LiveHost; child: ChildProcess } | undefined;
   private readonly attached = new Map<string, LiveHost>();
+  private generation = 0;
+  private transportEpoch = 0;
 
   constructor(private readonly controls: HostControls = defaultHostControls()) {}
 
@@ -72,7 +74,10 @@ export class HostPool {
     }
   }
 
-  async attach(install: DiscoveredInstall, loginUrl: string): Promise<LiveHost> {
+  async attach(
+    install: DiscoveredInstall,
+    loginUrl: string,
+  ): Promise<{ origin: string; cookie: string }> {
     if (!install.attachAvailable) {
       throw new DshError(
         "attach",
@@ -85,20 +90,63 @@ export class HostPool {
       this.attached.delete(install.id);
     }
     const session = await this.controls.exchange(loginUrl);
+    this.remember(install.id, session);
+    return session;
+  }
+
+  restore(install: DiscoveredInstall, session: { origin: string; cookie: string }): void {
+    if (!install.attachAvailable) {
+      throw new DshError(
+        "attach",
+        install.attachDisabledReason ?? "This client cannot be used directly",
+      );
+    }
+    if (this.attached.has(install.id)) return;
+    this.remember(install.id, session);
+  }
+
+  /** Zero when this install has no live login. Changes after each new login. */
+  sessionGeneration(installId: string): number {
+    return this.attached.has(installId) ? this.generation : 0;
+  }
+
+  /** Changes after a connection failure so the next catalog read tries again. */
+  transportGeneration(): number {
+    return this.transportEpoch;
+  }
+
+  noteTransportFailure(): void {
+    this.transportEpoch += 1;
+  }
+
+  attachment(installId: string): LiveHost | undefined {
+    return this.attached.get(installId);
+  }
+
+  /** The host Paseo already started or attached for this install. Does not launch one. */
+  live(installId: string): LiveHost | undefined {
+    if (this.owned?.id === installId) return this.owned.host;
+    return this.attached.get(installId);
+  }
+
+  async dropAttached(): Promise<void> {
+    const hosts = [...this.attached.values()];
+    if (hosts.length === 0) return;
+    this.attached.clear();
+    this.generation += 1;
+    await Promise.all(hosts.map((host) => host.close()));
+  }
+
+  private remember(installId: string, session: { origin: string; cookie: string }): void {
     const client = this.controls.connect(session);
-    const host: LiveHost = {
+    this.attached.set(installId, {
       client,
       owned: false,
       close: async () => {
         await client.close();
       },
-    };
-    this.attached.set(install.id, host);
-    return host;
-  }
-
-  attachment(installId: string): LiveHost | undefined {
-    return this.attached.get(installId);
+    });
+    this.generation += 1;
   }
 
   async closeOwned(): Promise<void> {

@@ -2,6 +2,7 @@ import {
   negotiateProviderCapabilities,
   requireProviderCapabilities,
   type ProviderCatalog,
+  type ProviderCatalogOptions,
   type ProviderCommand,
   type ProviderConfigChanges,
   type ProviderConnection,
@@ -14,6 +15,7 @@ import {
   type ProviderRegistration,
   type ProviderSessionConfig,
   type ProviderStatus,
+  type ProviderTimelineItem,
 } from "@getpaseo/plugin/server/provider";
 import type { DshSettings } from "../shared/settings.js";
 import {
@@ -24,15 +26,28 @@ import {
 } from "./discover.js";
 import { HostPool, type LiveHost } from "./host.js";
 import {
+  completeToolCall,
+  liveItemId,
   mapAddedSession,
   mapWireEvent,
   modelId,
+  reduceAssistantFrame,
+  rememberContextWindow,
+  type LiveAttempt,
   parseModelId,
   PROVIDER_DEFAULT_THINKING,
   reasoningForWrite,
   type WireEvent,
 } from "./events.js";
 import { DshError, type DshCaller } from "./remote.js";
+import type { SessionStore } from "./session-file.js";
+import {
+  filterSessions,
+  readImportIndex,
+  readWorkspaceList,
+  toProviderSessions,
+  type ListedWorkspace,
+} from "./workspaces.js";
 
 const CAPABILITIES = [
   "prompt.message",
@@ -64,20 +79,48 @@ export interface SettingsSource {
 export function createDshProvider(options: {
   settings: SettingsSource;
   pool: HostPool;
+  sessions?: SessionStore;
   discover?: (io?: DiscoverIO) => Promise<DiscoveredInstall[]>;
 }): ProviderRegistration {
   const discover = options.discover ?? (() => discoverInstalls(createNodeDiscoverIO()));
+  let restoring: Promise<void> | undefined;
+  const restoreSaved = () => {
+    restoring ??= restoreAttachment(
+      options.settings,
+      options.pool,
+      options.sessions,
+      discover,
+    ).finally(() => {
+      restoring = undefined;
+    });
+    return restoring;
+  };
+  const forgetLogin = async () => {
+    await options.pool.dropAttached();
+    await options.sessions?.clear();
+  };
   return {
     id: "dsh",
     label: "DeepSeek Harness",
     icon: "icon.svg",
-    command: ["dsh"],
+    async getCatalogCacheKey(_options: ProviderCatalogOptions) {
+      await restoreSaved();
+      const choice = await readChoice(options.settings);
+      return JSON.stringify({
+        installId: choice.installId,
+        mode: choice.mode,
+        generation: choice.installId ? options.pool.sessionGeneration(choice.installId) : 0,
+        transport: options.pool.transportGeneration(),
+      });
+    },
     async status() {
+      await restoreSaved();
       return readStatus(options.settings, options.pool, discover);
     },
     async connect(request) {
       if (!request.versions.includes(1))
         throw new DshError("protocol", "Provider protocol version 1 is required");
+      await restoreSaved();
       const choice = await chosenInstall(options.settings, discover);
       const host =
         choice.mode === "build"
@@ -89,9 +132,32 @@ export function createDshProvider(options: {
         () => {
           if (host.owned) void options.pool.closeOwned();
         },
+        forgetLogin,
+        () => options.pool.noteTransportFailure(),
       );
     },
   };
+}
+
+async function restoreAttachment(
+  settings: SettingsSource,
+  pool: HostPool,
+  sessions: SessionStore | undefined,
+  discover: () => Promise<DiscoveredInstall[]>,
+): Promise<void> {
+  if (!sessions) return;
+  const state = await settings.read();
+  if (state.status !== "ready" || !("values" in state)) return;
+  if (state.values.mode !== "attach" || !state.values.installId) {
+    if (state.values.mode === "build") await sessions.clear();
+    return;
+  }
+  if (pool.hasAttachment(state.values.installId)) return;
+  const saved = await sessions.read();
+  if (!saved || saved.installId !== state.values.installId) return;
+  const install = (await discover()).find((candidate) => candidate.id === saved.installId);
+  if (!install?.attachAvailable) return;
+  pool.restore(install, { origin: saved.origin, cookie: saved.cookie });
 }
 
 async function readStatus(
@@ -127,7 +193,19 @@ async function readStatus(
         diagnostic: "Paste this client's loopback login link in DeepSeek Harness settings.",
       };
     }
-    return { available: true };
+    const host = pool.attachment(install.id);
+    try {
+      await host?.client.ping();
+    } catch (error) {
+      pool.noteTransportFailure();
+      const detail =
+        error instanceof DshError ? error.message : "The saved login cannot reach the host.";
+      return {
+        available: false,
+        diagnostic: `${detail} Paste the browser address again.`,
+      };
+    }
+    return { available: true, diagnostic: `Using ${install.label} directly.` };
   }
   if (!install.canBuild) {
     return {
@@ -160,6 +238,14 @@ async function readChoice(settings: SettingsSource): Promise<DshSettings> {
   return state.values;
 }
 
+function isUnauthorized(error: unknown): boolean {
+  return error instanceof DshError && error.code === "remote" && error.message.includes("HTTP 401");
+}
+
+function isTransport(error: unknown): boolean {
+  return error instanceof DshError && error.code === "transport";
+}
+
 function requireAttachment(pool: HostPool, install: DiscoveredInstall): LiveHost {
   if (!install.attachAvailable) {
     throw new DshError(
@@ -180,6 +266,8 @@ function openConnection(
   host: LiveHost,
   capabilities: readonly string[],
   onClose: () => void,
+  onUnauthorized: () => Promise<void>,
+  onTransport: () => void,
 ): ProviderConnection {
   const listeners = new Set<(event: ProviderEvent) => void>();
   const sessions = new Map<string, DshSession>();
@@ -213,7 +301,12 @@ function openConnection(
       if (closed) throw new DshError("closed", "DeepSeek Harness connection is closed");
       requireProviderCapabilities(capabilities, input);
       queueMicrotask(() => {
-        if (!closed) void dispatch(input).catch((error: unknown) => fail(input, error));
+        if (!closed)
+          void dispatch(input).catch(async (error: unknown) => {
+            if (isUnauthorized(error)) await onUnauthorized();
+            if (isTransport(error)) onTransport();
+            fail(input, error);
+          });
       });
     },
     onEvent(listener) {
@@ -242,7 +335,11 @@ function openConnection(
       emit({
         type: "sessions",
         requestId: input.requestId,
-        sessions: await readSessions(host.client, input.cwd),
+        sessions: await readSessions(host.client, {
+          cwd: input.cwd,
+          query: input.query,
+          limit: input.limit,
+        }),
       });
       return;
     }
@@ -259,7 +356,7 @@ function openConnection(
       );
       sessions.set(input.sessionId, session);
       try {
-        await session.open(input.persistence?.data, input.history);
+        await session.open(input.requestId, input.persistence?.data);
       } catch (error) {
         sessions.delete(input.sessionId);
         await session.dispose();
@@ -274,10 +371,10 @@ function openConnection(
         input.type === "session.archive"
           ? "workspace/archiveSession"
           : "workspace/unarchiveSession",
-        {
+        withRequest({
           sessionId,
           ...(input.type === "session.archive" ? { stopActivity: false } : {}),
-        },
+        }),
       );
       emit({ type: "request.completed", requestId: input.requestId });
       return;
@@ -345,6 +442,12 @@ function openConnection(
   }
 }
 
+function retargetLiveItem(attemptId: string, item: ProviderTimelineItem): ProviderTimelineItem {
+  if (item.type === "assistant_message") return { ...item, id: liveItemId(attemptId, "assistant") };
+  if (item.type === "reasoning") return { ...item, id: liveItemId(attemptId, "reasoning") };
+  return item;
+}
+
 class DshSession {
   private resolvedId = "";
   get dshId(): string {
@@ -356,7 +459,12 @@ class DshSession {
     { eventId: string; event: string; questions?: QuestionItem[] }
   >();
   private selection: { provider: string; model: string } | undefined;
+  private appliedThinking: string | undefined;
   private activeTurn: string | undefined;
+  private contextWindowMax: number | undefined;
+  private liveAttempt: LiveAttempt | undefined;
+  private readonly liveCommits = new Map<number, string>();
+  private readonly openTools = new Map<string, ProviderTimelineItem>();
   private disposed = false;
 
   constructor(
@@ -368,7 +476,7 @@ class DshSession {
     private readonly registerChild: (session: DshSession) => void,
   ) {}
 
-  async open(persistence: unknown, history: "replay" | "skip"): Promise<void> {
+  async open(requestId: string, persistence: unknown): Promise<void> {
     const existing =
       isRecord(persistence) && typeof persistence.sessionId === "string"
         ? persistence.sessionId
@@ -377,6 +485,7 @@ class DshSession {
     if (this.config.model) await this.select(this.config.model, this.config.thinkingOption);
     this.emit({
       type: "session.opened",
+      requestId,
       sessionId: this.providerSessionId,
       capabilities: this.capabilities,
       restoration: "core",
@@ -384,7 +493,8 @@ class DshSession {
       persistence: { version: 1, data: { sessionId: this.resolvedId } },
       ...(this.config.title ? { title: this.config.title } : {}),
     });
-    if (history === "replay") this.follow();
+    // Create uses history "skip". This stream activates the host and carries the reply.
+    this.follow();
     this.emit({
       type: "session.commands",
       sessionId: this.providerSessionId,
@@ -395,7 +505,7 @@ class DshSession {
       sessionId: this.providerSessionId,
       config: await this.configState(),
     });
-    this.emit({ type: "session.ready", sessionId: this.providerSessionId });
+    this.emit({ type: "session.ready", requestId, sessionId: this.providerSessionId });
   }
 
   openChild(child: {
@@ -431,7 +541,10 @@ class DshSession {
 
   async prompt(prompt: ProviderPrompt): Promise<void> {
     if (prompt.input.type === "command" && prompt.input.name === "fork") {
-      const created = await this.host.client.call("session/fork", { sessionId: this.resolvedId });
+      const created = await this.host.client.call(
+        "session/fork",
+        withRequest({ sessionId: this.resolvedId }),
+      );
       const sessionId =
         isRecord(created) && typeof created.sessionId === "string" ? created.sessionId : "";
       this.emit({
@@ -452,12 +565,6 @@ class DshSession {
       });
       return;
     }
-    if (!this.host.owned && Object.keys(this.config.mcpServers).length > 0) {
-      throw new DshError("mcp", "Paseo tools are unavailable on a client Paseo did not start.");
-    }
-    if (this.host.owned && Object.keys(this.config.mcpServers).length > 0) {
-      throw new DshError("mcp", "This host has no recorded way to inject Paseo MCP at startup.");
-    }
     const content = promptContent(prompt);
     if (
       content.some((part) => isRecord(part) && part.type === "image") &&
@@ -465,12 +572,15 @@ class DshSession {
     ) {
       throw new DshError("image", "This session cannot send images");
     }
-    await this.host.client.call("session/prompt", {
-      requestId: prompt.clientMessageId,
-      sessionId: this.resolvedId,
-      mode: prompt.delivery === "steer" ? "steer" : "queue",
-      content,
-    });
+    await this.host.client.call(
+      "session/prompt",
+      withRequest({
+        requestId: prompt.clientMessageId,
+        sessionId: this.resolvedId,
+        mode: prompt.delivery === "steer" ? "steer" : "queue",
+        content,
+      }),
+    );
     const turnId =
       prompt.delivery === "steer"
         ? (this.activeTurn ?? prompt.clientMessageId)
@@ -501,12 +611,15 @@ class DshSession {
       );
     }
     if (changes.mode) {
-      await this.host.client.call("session/prompt", {
-        requestId: `mode-${changes.mode}`,
-        sessionId: this.resolvedId,
-        mode: "queue",
-        content: [{ type: "text", text: changes.mode === "plan" ? "/plan" : "/plan off" }],
-      });
+      await this.host.client.call(
+        "session/prompt",
+        withRequest({
+          requestId: `mode-${changes.mode}`,
+          sessionId: this.resolvedId,
+          mode: "queue",
+          content: [{ type: "text", text: changes.mode === "plan" ? "/plan" : "/plan off" }],
+        }),
+      );
     }
     this.emit({
       type: "session.config",
@@ -516,12 +629,15 @@ class DshSession {
   }
 
   async interrupt(): Promise<void> {
-    await this.host.client.call("session/cancel", { sessionId: this.resolvedId });
+    await this.host.client.call("session/cancel", withRequest({ sessionId: this.resolvedId }));
   }
 
   async canStop(openSessions: number): Promise<boolean> {
     if (!this.host.owned || openSessions > 1) return false;
-    const state = await this.host.client.call("session/state", { sessionId: this.resolvedId });
+    const state = await this.host.client.call(
+      "session/state",
+      withRequest({ sessionId: this.resolvedId }),
+    );
     if (!isRecord(state)) return false;
     const pending = Array.isArray(state.pendingInput) ? state.pendingInput.length : 0;
     const queued = Array.isArray(state.queue) ? state.queue.length : 0;
@@ -575,7 +691,10 @@ class DshSession {
   }
 
   private async create(): Promise<string> {
-    const created = await this.host.client.call("session/create", { cwd: this.config.cwd });
+    const created = await this.host.client.call(
+      "session/create",
+      withRequest({ cwd: this.config.cwd }),
+    );
     if (!isRecord(created) || typeof created.sessionId !== "string") {
       throw new DshError("session", "The host did not return a session id");
     }
@@ -587,6 +706,10 @@ class DshSession {
       if (this.disposed || !isRecord(value)) return;
       if (value.type === "snapshot" && Array.isArray(value.records)) {
         for (const record of value.records) this.apply(record);
+        return;
+      }
+      if (value.type === "assistant-stream") {
+        this.onAssistantFrame(value.frame);
         return;
       }
       if (value.type === "event") this.apply(value);
@@ -606,11 +729,19 @@ class DshSession {
     if (typeof event.type !== "string" || typeof event.seq !== "number") return;
     const wire: WireEvent = { type: event.type, seq: event.seq, data: event.data };
     const mapped = mapWireEvent(wire);
-    for (const item of mapped.items) {
+    for (const item of this.present(event.seq, mapped.items)) {
+      this.rememberTool(item);
       this.emit({ type: "timeline.item", sessionId: this.providerSessionId, item });
     }
-    if (mapped.usage)
-      this.emit({ type: "session.usage", sessionId: this.providerSessionId, usage: mapped.usage });
+    if (mapped.usage) {
+      const remembered = rememberContextWindow(this.contextWindowMax, mapped.usage);
+      this.contextWindowMax = remembered.remembered;
+      this.emit({
+        type: "session.usage",
+        sessionId: this.providerSessionId,
+        usage: remembered.usage,
+      });
+    }
     if (mapped.mode) {
       const mode = mapped.mode;
       void this.configState().then((config) => {
@@ -634,22 +765,50 @@ class DshSession {
     }
   }
 
+  private onAssistantFrame(frame: unknown): void {
+    const reduced = reduceAssistantFrame(this.liveAttempt, frame);
+    this.liveAttempt = reduced.state;
+    if (reduced.commit) this.liveCommits.set(reduced.commit.seq, reduced.commit.attemptId);
+    for (const item of reduced.items) {
+      this.emit({ type: "timeline.item", sessionId: this.providerSessionId, item });
+    }
+  }
+
+  private present(seq: number, items: ProviderTimelineItem[]): ProviderTimelineItem[] {
+    const attemptId = this.liveCommits.get(seq);
+    return items.flatMap((item) => {
+      const retargeted = attemptId ? retargetLiveItem(attemptId, item) : item;
+      if (retargeted.type !== "tool_call" || retargeted.status === "running") return [retargeted];
+      return [completeToolCall(this.openTools.get(retargeted.callId), retargeted)];
+    });
+  }
+
+  private rememberTool(item: ProviderTimelineItem): void {
+    if (item.type === "tool_call" && item.status === "running")
+      this.openTools.set(item.callId, item);
+  }
+
   private async select(model: string, thinking: string | null | undefined): Promise<void> {
     const parsed = parseModelId(model);
     if (!parsed) throw new DshError("model", "The selected model is not a provider and model pair");
-    const reasoningEffort = reasoningForWrite(thinking);
-    await this.host.client.call("session/selectModel", {
-      sessionId: this.resolvedId,
-      provider: parsed.provider,
-      model: parsed.model,
-      ...(reasoningEffort ? { reasoningEffort } : {}),
-    });
+    const catalog = await readCatalog(this.host.client);
+    const reasoningEffort = listedEffort(catalog.models, parsed, thinking);
+    await this.host.client.call(
+      "session/selectModel",
+      withRequest({
+        sessionId: this.resolvedId,
+        provider: parsed.provider,
+        model: parsed.model,
+        ...(reasoningEffort ? { reasoningEffort } : {}),
+      }),
+    );
     this.selection = parsed;
+    this.appliedThinking = reasoningEffort;
   }
 
   private async commands(): Promise<ProviderCommand[]> {
     const listed = await this.host.client
-      .call("skills/list", { sessionId: this.resolvedId })
+      .call("skills/list", withRequest({ sessionId: this.resolvedId }))
       .catch(() => undefined);
     const skills = isRecord(listed) && Array.isArray(listed.skills) ? listed.skills : [];
     return [
@@ -670,15 +829,22 @@ class DshSession {
 
   private async configState() {
     const catalog = await readCatalog(this.host.client);
+    const currentId = this.selection
+      ? modelId(this.selection.provider, this.selection.model)
+      : catalog.defaultModel;
+    const current = catalog.models.find((model) => model.id === currentId);
+    const thinkingOptions = current?.thinkingOptions ?? [];
+    const thinkingOption =
+      this.appliedThinking && thinkingOptions.some((option) => option.id === this.appliedThinking)
+        ? this.appliedThinking
+        : undefined;
     return {
-      model: this.selection
-        ? modelId(this.selection.provider, this.selection.model)
-        : catalog.defaultModel,
+      model: currentId,
       mode: this.config.mode ?? catalog.defaultMode,
-      thinkingOption: this.config.thinkingOption ?? catalog.defaultThinkingOption,
+      ...(thinkingOption ? { thinkingOption } : {}),
       models: catalog.models,
       modes: catalog.modes,
-      thinkingOptions: catalog.thinkingOptions ?? [],
+      thinkingOptions,
       settings: [],
     };
   }
@@ -689,34 +855,21 @@ async function readCatalog(client: DshCaller): Promise<ProviderCatalog> {
   const groups = isRecord(value) && Array.isArray(value.groups) ? value.groups : [];
   const models = groups.flatMap((group) => {
     if (!isRecord(group) || typeof group.id !== "string" || !Array.isArray(group.models)) return [];
+    const groupName = typeof group.name === "string" ? group.name : group.id;
     return group.models.flatMap((model) => {
       if (!isRecord(model) || typeof model.id !== "string") return [];
-      const efforts =
-        isRecord(model.reasoning) && Array.isArray(model.reasoning.efforts)
-          ? model.reasoning.efforts
-          : [];
-      const thinkingOptions = efforts.flatMap((effort) => {
-        if (!isRecord(effort) || typeof effort.id !== "string") return [];
-        return [
-          { id: effort.id, label: typeof effort.name === "string" ? effort.name : effort.id },
-        ];
-      });
-      if (
-        !efforts.some((effort) => isRecord(effort) && effort.id === "") &&
-        isRecord(model.reasoning) &&
-        model.reasoning.defaultEffort === undefined
-      ) {
-        thinkingOptions.unshift({ id: PROVIDER_DEFAULT_THINKING, label: "Provider default" });
-      }
+      const thinking = thinkingForModel(model);
+      const detail = typeof model.description === "string" ? model.description : undefined;
       return [
         {
           id: modelId(String(group.id), String(model.id)),
-          label:
-            typeof model.name === "string"
-              ? `${String(group.name ?? group.id)} / ${model.name}`
-              : model.id,
-          ...(thinkingOptions.length > 0
-            ? { thinkingOptions, defaultThinkingOptionId: thinkingOptions[0]?.id }
+          // The id is the provider/model pair the host requires. The picker shows
+          // that id whenever description is missing, so the visible name stays the model name.
+          label: typeof model.name === "string" ? model.name : model.id,
+          description: detail ?? groupName,
+          thinkingOptions: thinking.thinkingOptions,
+          ...(thinking.defaultThinkingOptionId
+            ? { defaultThinkingOptionId: thinking.defaultThinkingOptionId }
             : {}),
         },
       ];
@@ -735,29 +888,67 @@ async function readCatalog(client: DshCaller): Promise<ProviderCatalog> {
       { id: "default", label: "Default" },
       { id: "plan", label: "Plan" },
     ],
-    thinkingOptions: models[0]?.thinkingOptions,
     ...(fallback ? { defaultModel: fallback } : {}),
     defaultMode: "default",
-    defaultThinkingOption: models[0]?.defaultThinkingOptionId,
   };
 }
 
-async function readSessions(client: DshCaller, cwd: string | undefined) {
-  const value = await client.call("session/list", {});
-  const items = isRecord(value) && Array.isArray(value.items) ? value.items : [];
-  return items.flatMap((item) => {
-    if (!isRecord(item) || typeof item.sessionId !== "string") return [];
-    if (cwd && typeof item.cwd === "string" && item.cwd !== cwd) return [];
-    return [
-      {
-        persistence: { version: 1, data: { sessionId: item.sessionId } },
-        cwd: typeof item.cwd === "string" ? item.cwd : (cwd ?? ""),
-        ...(typeof item.updatedAt === "number"
-          ? { updatedAt: new Date(item.updatedAt).toISOString() }
-          : {}),
-      },
-    ];
+/** A model with no `reasoning` advertises no efforts. Another model's list must not fill in. */
+function thinkingForModel(model: Record<string, unknown>): {
+  thinkingOptions: { id: string; label: string }[];
+  defaultThinkingOptionId?: string;
+} {
+  const reasoning = isRecord(model.reasoning) ? model.reasoning : undefined;
+  const efforts = reasoning && Array.isArray(reasoning.efforts) ? reasoning.efforts : [];
+  const thinkingOptions = efforts.flatMap((effort) => {
+    if (!isRecord(effort) || typeof effort.id !== "string") return [];
+    return [{ id: effort.id, label: typeof effort.name === "string" ? effort.name : effort.id }];
   });
+  if (thinkingOptions.length === 0) return { thinkingOptions };
+  const defaultEffort =
+    typeof reasoning?.defaultEffort === "string" ? reasoning.defaultEffort : undefined;
+  if (defaultEffort && thinkingOptions.some((option) => option.id === defaultEffort)) {
+    return { thinkingOptions, defaultThinkingOptionId: defaultEffort };
+  }
+  if (!thinkingOptions.some((option) => option.id === "")) {
+    thinkingOptions.unshift({ id: PROVIDER_DEFAULT_THINKING, label: "Provider default" });
+  }
+  return { thinkingOptions, defaultThinkingOptionId: thinkingOptions[0]?.id };
+}
+
+function listedEffort(
+  models: readonly { id: string; thinkingOptions?: readonly { id: string }[] }[],
+  parsed: { provider: string; model: string },
+  thinking: string | null | undefined,
+): string | undefined {
+  const effort = reasoningForWrite(thinking);
+  if (!effort) return undefined;
+  const model = models.find((item) => item.id === modelId(parsed.provider, parsed.model));
+  if (!model?.thinkingOptions?.some((option) => option.id === effort)) return undefined;
+  return effort;
+}
+
+export async function listConnectedWorkspaces(options: {
+  settings: SettingsSource;
+  pool: HostPool;
+  sessions?: SessionStore;
+  discover?: (io?: DiscoverIO) => Promise<DiscoveredInstall[]>;
+}): Promise<ListedWorkspace[]> {
+  const discover = options.discover ?? (() => discoverInstalls(createNodeDiscoverIO()));
+  await restoreAttachment(options.settings, options.pool, options.sessions, discover);
+  const choice = await readChoice(options.settings);
+  if (!choice.installId || !choice.mode) return [];
+  const host = options.pool.live(choice.installId);
+  if (!host) return [];
+  return readWorkspaceList(host.client);
+}
+
+async function readSessions(
+  client: DshCaller,
+  input: { cwd?: string; query?: string; limit?: number },
+) {
+  const index = await readImportIndex(client);
+  return toProviderSessions(filterSessions(index.sessions, input));
 }
 
 interface QuestionItem {
@@ -910,6 +1101,11 @@ function promptContent(prompt: ProviderPrompt): Record<string, unknown>[] {
       content.push({ type: "text", text: part.title });
   }
   return content;
+}
+
+/** Typert names the single session argument `request`; `cwd` lives inside it. */
+function withRequest(request: Record<string, unknown>): Record<string, unknown> {
+  return { request };
 }
 
 function persistedSessionId(data: unknown): string {

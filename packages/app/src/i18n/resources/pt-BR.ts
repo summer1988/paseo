@@ -460,6 +460,7 @@ export const ptBR: TranslationResources = {
     row: {
       importing: "Importando...",
     },
+    workspaces: en.importSession.workspaces,
   },
   workspace: {
     route: {

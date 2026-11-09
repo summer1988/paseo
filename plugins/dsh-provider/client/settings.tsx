@@ -1,6 +1,7 @@
 import { useRpc, useSettings, type PluginSurfaceProps } from "@getpaseo/plugin/client";
-import { useCallback, useMemo, useState } from "react";
-import { Pressable, ScrollView, Text, TextInput, View } from "react-native";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { Pressable, Text, TextInput, View } from "react-native";
+import { chooseAttachInstall } from "../shared/choose-attach.js";
 import { attachInstall, listInstalls, type DshInstall } from "../shared/contract.js";
 import { dshSettings } from "../shared/settings.js";
 
@@ -14,7 +15,7 @@ export function DshSettingsScreen({ theme, layout }: PluginSurfaceProps) {
   const padding = layout.compact ? 16 : 24;
   const styles = useMemo(
     () => ({
-      screen: { flex: 1, backgroundColor: theme.colors.surface0, padding, gap: 12 },
+      screen: { backgroundColor: theme.colors.surface0, padding, gap: 12 },
       title: { color: theme.colors.foreground, fontSize: layout.compact ? 20 : 24 },
       body: { color: theme.colors.foregroundMuted, fontSize: 14 },
       card: {
@@ -57,12 +58,56 @@ export function DshSettingsScreen({ theme, layout }: PluginSurfaceProps) {
     void refresh();
   }, [refresh]);
 
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
+
+  const addFromBrowser = useCallback(async () => {
+    if (settings.status !== "ready") {
+      setError("DeepSeek Harness settings are still loading.");
+      return;
+    }
+    const loginUrl = link.trim();
+    if (!loginUrl) {
+      setError("Paste the loopback address from the browser.");
+      return;
+    }
+    try {
+      const found = installs ?? (await loadInstalls({})).installs;
+      setInstalls(found);
+      const choice = chooseAttachInstall(found, settings.values.installId);
+      if ("error" in choice) {
+        setError(choice.error);
+        return;
+      }
+      await attach({ installId: choice.install.id, loginUrl });
+      setLink("");
+      const saved = await settings.save(
+        { installId: choice.install.id, mode: "attach" },
+        settings.revision,
+      );
+      if (!saved) setError(settings.saveError ?? "Could not save the selection");
+      else setError(undefined);
+    } catch (failure) {
+      setError(failure instanceof Error ? failure.message : "Could not use that address");
+    }
+  }, [attach, installs, link, loadInstalls, settings]);
+
+  const add = useCallback(() => {
+    void addFromBrowser();
+  }, [addFromBrowser]);
+
   const choose = useCallback(
     async (install: DshInstall, mode: "build" | "attach") => {
       if (settings.status !== "ready") return;
       if (mode === "attach") {
+        const loginUrl = link.trim();
+        if (!loginUrl) {
+          setError("Paste the loopback address from the browser.");
+          return;
+        }
         try {
-          await attach({ installId: install.id, loginUrl: link });
+          await attach({ installId: install.id, loginUrl });
           setLink("");
         } catch (failure) {
           setError(failure instanceof Error ? failure.message : "Could not use that client");
@@ -76,16 +121,42 @@ export function DshSettingsScreen({ theme, layout }: PluginSurfaceProps) {
   );
 
   return (
-    <ScrollView contentContainerStyle={styles.screen}>
+    <View style={styles.screen} testID="dsh-client-setup">
       <Text style={styles.title}>DeepSeek Harness</Text>
       <Text style={styles.body}>
         Choose an installed official client or DSH NEXT. Build starts a host from that install. Use
         connects to a client that is already running.
       </Text>
+      <View style={styles.card}>
+        <Text style={styles.label}>Add from browser address</Text>
+        <Text style={styles.body}>
+          Paste the loopback address from the browser address bar. Paseo exchanges it immediately
+          and does not save the address. The login stays on this computer, so a Paseo restart
+          reconnects. Paste a new address after the host itself restarts.
+        </Text>
+        <TextInput
+          value={link}
+          onChangeText={setLink}
+          placeholder="http://127.0.0.1:port/?token=…"
+          placeholderTextColor={theme.colors.foregroundMuted}
+          autoCapitalize="none"
+          autoCorrect={false}
+          secureTextEntry
+          style={styles.input}
+        />
+        <Pressable accessibilityRole="button" onPress={add} style={styles.button}>
+          <Text style={styles.buttonText}>Add this address</Text>
+        </Pressable>
+      </View>
       {settings.status === "ready" && settings.values.installId ? (
         <Text style={styles.body}>
-          Selected {settings.values.mode === "attach" ? "direct use" : "build"} for{" "}
-          {settings.values.installId}
+          Saved {settings.values.mode === "attach" ? "direct use" : "build"} for{" "}
+          {installs?.find((install) => install.id === settings.values.installId)?.label ??
+            settings.values.installId}
+          .
+          {settings.values.mode === "attach"
+            ? " The browser address is not kept. This computer reconnects with the saved login."
+            : ""}
         </Text>
       ) : null}
       <Pressable accessibilityRole="button" onPress={search} style={styles.button}>
@@ -108,7 +179,7 @@ export function DshSettingsScreen({ theme, layout }: PluginSurfaceProps) {
           styles={styles}
         />
       ))}
-    </ScrollView>
+    </View>
   );
 }
 

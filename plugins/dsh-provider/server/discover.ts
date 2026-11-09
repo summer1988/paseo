@@ -19,6 +19,7 @@ export interface DiscoveredInstall extends DshInstall {
 
 export interface DiscoverIO {
   platform: NodeJS.Platform;
+  arch: string;
   env: NodeJS.ProcessEnv;
   homedir: string;
   which(command: string): Promise<string | null>;
@@ -29,6 +30,7 @@ export interface DiscoverIO {
   version(command: string): Promise<string | null>;
 }
 
+const NEXT_HEADER_BYTES = 64 * 1024;
 const OFFICIAL_DESKTOP_ATTACH =
   "Official DeepSeek Harness does not publish a login link. Build a host from this install instead.";
 const HOST_ENTRY = path.join("node_modules", "@deepseek-ai", "dsh-desktop-host", "lib", "index.js");
@@ -48,6 +50,7 @@ export async function discoverInstalls(io: DiscoverIO): Promise<DiscoveredInstal
 export function createNodeDiscoverIO(env: NodeJS.ProcessEnv = process.env): DiscoverIO {
   return {
     platform: process.platform,
+    arch: process.arch,
     env,
     homedir: os.homedir(),
     async which(command) {
@@ -250,10 +253,12 @@ async function finishDesktop(
     ].map((dir) => path.join(dir, HOST_ENTRY)),
   );
   const home = kind === "dsh-next" ? await nextHome(io) : officialHome(io);
-  const entry = runtimeDir;
-  const launch = entry
-    ? desktopLaunch(runtimeDirFromEntry(entry), entry, binary, home, resources)
-    : undefined;
+  let launch: InstallLaunch | undefined;
+  if (runtimeDir) {
+    launch = desktopLaunch(runtimeDirFromEntry(runtimeDir), runtimeDir, binary, home, resources);
+  } else if (kind === "dsh-next") {
+    launch = await nextPackagedLaunch(io, binary, home, resources);
+  }
   const official = kind === "official-desktop";
   return {
     id: `${kind}:${location}`,
@@ -274,6 +279,44 @@ function runtimeDirFromEntry(entry: string): string {
   let directory = entry;
   for (let depth = 0; depth < 5; depth += 1) directory = path.dirname(directory);
   return directory;
+}
+
+async function nextPackagedLaunch(
+  io: DiscoverIO,
+  binary: string,
+  home: string,
+  resources: string,
+): Promise<InstallLaunch | undefined> {
+  const archive = path.join(resources, "app.asar");
+  const primaryRuntime = path.join(resources, "runtime", io.arch, "primary-runtime");
+  if (!(await io.exists(archive)) || !(await io.exists(primaryRuntime))) return undefined;
+  const projectDir = path.join(home, "profiles", await nextProfile(io, home));
+  return {
+    command: binary,
+    args: [
+      "--expose-internals",
+      `--max-http-header-size=${NEXT_HEADER_BYTES}`,
+      path.join(archive, "lib", "host.js"),
+      archive,
+      projectDir,
+      primaryRuntime,
+    ],
+    env: { ELECTRON_RUN_AS_NODE: "1", DSH_HOME: home },
+    cwd: projectDir,
+    ipc: true,
+  };
+}
+
+async function nextProfile(io: DiscoverIO, home: string): Promise<string> {
+  const text = await io.readText(path.join(home, "desktop-next.json"));
+  if (!text) return "desktop";
+  try {
+    const parsed: unknown = JSON.parse(text);
+    if (!isRecord(parsed) || typeof parsed.active !== "string") return "desktop";
+    return /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/u.test(parsed.active) ? parsed.active : "desktop";
+  } catch {
+    return "desktop";
+  }
 }
 
 function desktopLaunch(

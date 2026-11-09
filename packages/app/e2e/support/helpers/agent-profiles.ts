@@ -375,8 +375,7 @@ export function profilePickerRow(page: Page, name: string): Locator {
 }
 
 /**
- * Profiles are pinned above the provider list, so "pinned" is an ordering claim:
- * the profile row's top edge sits above every provider row's.
+ * Providers sit above profiles, so the profile row's top edge is below every provider row's.
  */
 export async function expectProfilePinnedAboveProviders(
   page: Page,
@@ -393,7 +392,7 @@ export async function expectProfilePinnedAboveProviders(
   await expect(providerRows.first()).toBeVisible();
   const providerCount = await providerRows.count();
   for (let index = 0; index < providerCount; index += 1) {
-    expect(profileTop).toBeLessThan(await boxTop(providerRows.nth(index)));
+    expect(profileTop).toBeGreaterThan(await boxTop(providerRows.nth(index)));
   }
 }
 

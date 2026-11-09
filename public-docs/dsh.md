@@ -10,6 +10,8 @@ category: Providers
 
 Paseo drives DeepSeek Harness as a coding agent through the bundled `dsh-provider` plugin. Login, models, and API keys stay in the client home you select. Paseo does not embed the client's window.
 
+The model menu lists every enabled provider before its models, with providers above profiles. Choose DeepSeek Harness there when you start a chat. Choosing it from a chat that is already running keeps that provider and model for the next new chat.
+
 ## Install
 
 Install one of these on the machine running the Paseo daemon:
@@ -21,7 +23,7 @@ Paseo searches `PATH`, the npm global prefix, and installed desktop apps. It doe
 
 ## Choose a client
 
-In Paseo, open the DeepSeek Harness plugin settings and search for installed clients. Each row has two actions. Nothing starts until you choose.
+In Paseo, open Settings, choose this host, then Providers, then DeepSeek Harness. That sheet is where you paste a loopback browser address or pick an installed client. Its Diagnostic view has the same controls. Built-in plugins are not listed under Plugins, so this provider sheet is the setup screen. Each install row has two actions. Nothing starts until you choose.
 
 ## Build from an install
 
@@ -29,7 +31,9 @@ In Paseo, open the DeepSeek Harness plugin settings and search for installed cli
 
 ## Use a running client
 
-**Use this running client** connects to a host that is already listening. Paste the loopback login link. Paseo exchanges it for a cookie immediately and does not save the link, the token, or the cookie. Paste a new link after the host restarts.
+**Use this running client** connects to a host that is already listening. Paste the loopback login link. Paseo exchanges it immediately and does not save the link or the token. The login stays on this computer, so Paseo reconnects after it restarts. Paste a new link after the host itself restarts.
+
+**Add this address**, at the top of the same settings screen, takes the value from the browser address bar, for example `http://127.0.0.1:55461/?token=…`. It uses the selected client when that client can be used directly, and otherwise the only such client. When several clients can accept an address, use the row for the one that is running. The address and token are not saved.
 
 - `dsh web` prints the link in its own terminal.
 - DSH NEXT shows the link in desktop settings after you enable local browser access.
@@ -40,6 +44,10 @@ Paseo does not read another process's output, Electron IPC, or cookie store to o
 ## Login
 
 Sign in with the client whose home you selected. A missing credential surfaces as `session/provider-credentials-unavailable`. If another client is already writing a session, Paseo shows `session/writer-held` and does not open a blank replacement.
+
+## Import workspaces
+
+Open Import session. When DeepSeek Harness is connected, the sheet lists its workspaces. Check the ones to bring in. Paseo imports each user session in those directories into the workspace for that directory. Archived sessions, blank sessions, and subagent sessions stay out. A workspace import stops at 200 sessions, the import page limit.
 
 ## Limits
 

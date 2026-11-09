@@ -175,6 +175,57 @@ describe("shared tool-call display mapping", () => {
     expect(display.displayName).toBe("Speak");
   });
 
+  it("shows the latest thinking line beside Thinking", () => {
+    const display = buildToolCallDisplayModel({
+      name: "thinking",
+      status: "running",
+      error: null,
+      detail: {
+        type: "unknown",
+        input: "first\n\n  second   line  ",
+        output: null,
+      },
+    });
+
+    expect(display).toEqual({
+      displayName: "Thinking",
+      summary: "second line",
+    });
+  });
+
+  it("omits a thinking summary when the text is blank", () => {
+    const display = buildToolCallDisplayModel({
+      name: "Thinking",
+      status: "completed",
+      error: null,
+      detail: {
+        type: "unknown",
+        input: " \n\u200b\n",
+        output: null,
+      },
+    });
+
+    expect(display).toEqual({
+      displayName: "Thinking",
+    });
+  });
+
+  it("keeps the tail of a long thinking line", () => {
+    const display = buildToolCallDisplayModel({
+      name: "thinking",
+      status: "running",
+      error: null,
+      detail: {
+        type: "unknown",
+        input: "a".repeat(200),
+        output: null,
+      },
+    });
+
+    expect(display.summary).toBe(`...${"a".repeat(157)}`);
+    expect(display.summary).toHaveLength(160);
+  });
+
   it("labels plan detail rows as Plan", () => {
     const display = buildToolCallDisplayModel({
       name: "plan",

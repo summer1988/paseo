@@ -457,6 +457,7 @@ export const ko: TranslationResources = {
     row: {
       importing: "가져오는 중...",
     },
+    workspaces: en.importSession.workspaces,
   },
   workspace: {
     route: {

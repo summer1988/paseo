@@ -6,6 +6,7 @@ const HOST = path.join("node_modules", "@deepseek-ai", "dsh-desktop-host", "lib"
 
 function io(input: {
   platform?: NodeJS.Platform;
+  arch?: string;
   env?: NodeJS.ProcessEnv;
   homedir?: string;
   which?: string | null;
@@ -18,6 +19,7 @@ function io(input: {
   }
   return {
     platform: input.platform ?? "darwin",
+    arch: input.arch ?? "arm64",
     env: input.env ?? {},
     homedir: input.homedir ?? "/Users/me",
     async which() {
@@ -109,6 +111,58 @@ test("finds the official CLI, official desktop, and DSH NEXT", async () => {
   expect(community?.attachAvailable).toBe(true);
   expect(community?.home).toBe("/Users/me/next-home");
   expect(community?.launch?.env.DSH_HOME).toBe("/Users/me/next-home");
+});
+
+test("builds DSH NEXT from the packaged asar host", async () => {
+  const next = "/Applications/DSH NEXT.app";
+  const resources = path.join(next, "Contents", "Resources");
+  const archive = path.join(resources, "app.asar");
+  const primary = path.join(resources, "runtime", "arm64", "primary-runtime");
+  const home = "/Users/me/next-home";
+  const installs = await discoverInstalls(
+    io({
+      which: null,
+      arch: "arm64",
+      dirs: { "/Applications": ["DSH NEXT.app"] },
+      files: {
+        [path.join(next, "Contents", "Info.plist")]: plist("DSH NEXT", "DSH NEXT", "2.0.22"),
+        [path.join(next, "Contents", "MacOS", "DSH NEXT")]: "",
+        [archive]: "",
+        [primary]: "",
+        [path.join(home, "desktop-next.json")]: JSON.stringify({ active: "coding" }),
+        [path.join(
+          "/Users/me",
+          "Library",
+          "Application Support",
+          "DSH NEXT",
+          "home",
+          "desktop-next-location.json",
+        )]: JSON.stringify({ path: home }),
+      },
+    }),
+  );
+  expect(installs).toHaveLength(1);
+  expect(installs[0]).toMatchObject({
+    kind: "dsh-next",
+    canBuild: true,
+    attachAvailable: true,
+    home,
+  });
+  const projectDir = path.join(home, "profiles", "coding");
+  expect(installs[0]?.launch).toMatchObject({
+    command: path.join(next, "Contents", "MacOS", "DSH NEXT"),
+    args: [
+      "--expose-internals",
+      "--max-http-header-size=65536",
+      path.join(archive, "lib", "host.js"),
+      archive,
+      projectDir,
+      primary,
+    ],
+    cwd: projectDir,
+    ipc: true,
+    env: { ELECTRON_RUN_AS_NODE: "1", DSH_HOME: home },
+  });
 });
 
 test("lists a desktop install that cannot build when its host entry is missing", async () => {

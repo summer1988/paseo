@@ -453,6 +453,16 @@ export const en = {
     row: {
       importing: "Importing...",
     },
+    workspaces: {
+      title: "DeepSeek Harness workspaces",
+      sessions: "{{count}} sessions",
+      import: "Import selected workspaces",
+      importing: "Importing {{done}}/{{total}}",
+      unavailable: "Could not read DeepSeek Harness workspaces.",
+      alreadyImported: "Every session in the selected workspaces is already imported.",
+      failed: "Could not import the selected workspaces.",
+      partial: "Imported {{done}}. {{failed}} could not be imported.",
+    },
   },
   workspace: {
     route: {

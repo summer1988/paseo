@@ -67,7 +67,7 @@ describe("model browser initial view", () => {
     ).toEqual({ kind: "provider", providerId: "pi", providerLabel: "Pi" });
   });
 
-  it("opens the selected provider when there is one", () => {
+  it("opens the provider list when several providers are available", () => {
     expect(
       resolveInitialModelBrowserView({
         providers: [codex, pi],
@@ -75,7 +75,7 @@ describe("model browser initial view", () => {
         selectedModel: "pi-pro",
         hasProfiles: false,
       }),
-    ).toEqual({ kind: "provider", providerId: "pi", providerLabel: "Pi" });
+    ).toEqual({ kind: "all" });
   });
 
   it("opens the root so pinned profiles are reachable", () => {

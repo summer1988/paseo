@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { ToolCallDetail } from "@getpaseo/protocol/agent-types";
 import type { StreamItem, ToolCallItem } from "@/types/stream";
+import { buildOverviewGroup, thoughtOnlyPreview } from "./overview/model";
 import {
   prepareToolCallHistory,
   projectToolCallDetailLevel,
@@ -571,4 +572,35 @@ it("shows one thought as itself until another groupable item arrives", () => {
   });
   expect(grouped.tail.map((item) => item.id)).toEqual([thought.id]);
   expect(grouped.groupsByHostId.get(thought.id)?.run.calls).toHaveLength(2);
+});
+
+it("shows the latest line for a thought-only group and hides it once a tool joins", () => {
+  const first = {
+    kind: "thought" as const,
+    id: "thought-1",
+    text: "old\nkept",
+    status: "ready" as const,
+    timestamp: new Date(0),
+  };
+  const second = {
+    kind: "thought" as const,
+    id: "thought-2",
+    text: "  live   now  ",
+    status: "loading" as const,
+    timestamp: new Date(1),
+  };
+  const thoughts = buildOverviewGroup({
+    id: first.id,
+    calls: [first, second],
+    latest: second,
+    isSealed: false,
+  });
+  expect(thoughtOnlyPreview(thoughts)).toBe("live now");
+  const mixed = buildOverviewGroup({
+    id: first.id,
+    calls: [first, toolCall("1", { type: "shell", command: "pwd" })],
+    latest: toolCall("1", { type: "shell", command: "pwd" }),
+    isSealed: true,
+  });
+  expect(thoughtOnlyPreview(mixed)).toBeUndefined();
 });

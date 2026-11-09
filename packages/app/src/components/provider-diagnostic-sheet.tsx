@@ -19,6 +19,7 @@ import { useToast } from "@/contexts/toast-context";
 import { CODE_SURFACE_DATASET } from "@/styles/code-surface";
 import { useDaemonConfig } from "@/hooks/use-daemon-config";
 import { useProvidersSnapshot } from "@/hooks/use-providers-snapshot";
+import { PluginSettingsSurface } from "@/plugins/settings";
 import { useTimeAgo } from "@/hooks/use-time-ago";
 import { useHostRuntimeClient } from "@/runtime/host-runtime";
 import { settingsStyles } from "@/styles/settings";
@@ -234,6 +235,11 @@ function AddCustomModelSubSheet({
   );
 }
 
+function DshClientSetup({ serverId }: { serverId: string }) {
+  // Built-ins are omitted from Settings → Plugins, so the provider sheet hosts this screen.
+  return <PluginSettingsSurface serverId={serverId} pluginId="dsh-provider" screenId="client" />;
+}
+
 function DiagnosticSubSheet({
   provider,
   serverId,
@@ -379,15 +385,17 @@ function DiagnosticSubSheet({
     );
   }
 
+  const showClientSetup = provider === "dsh";
   return (
     <AdaptiveModalSheet
       header={header}
       visible={visible}
       onClose={onClose}
       snapPoints={DIAGNOSTIC_SNAP_POINTS}
-      scrollable={false}
+      scrollable={showClientSetup}
       testID="provider-diagnostic-sheet"
     >
+      {showClientSetup ? <DshClientSetup serverId={serverId} /> : null}
       {body}
     </AdaptiveModalSheet>
   );
@@ -689,6 +697,7 @@ export function ProviderDiagnosticSheet({
         })}
         snapPoints={MAIN_SNAP_POINTS}
       >
+        {provider === "dsh" ? <DshClientSetup serverId={serverId} /> : null}
         <ProviderModalBody
           discoveredCount={discoveredModels.length}
           additionalCount={additionalModels.length}

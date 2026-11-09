@@ -77,6 +77,7 @@ vi.mock("lucide-react-native", () => {
     ChevronDown: icon("ChevronDown"),
     Inbox: icon("Inbox"),
     Layers: icon("Layers"),
+    Check: icon("Check"),
     RotateCw: icon("RotateCw"),
     Search: icon("Search"),
     X: icon("X"),
@@ -243,7 +244,9 @@ function applyHostMocks(options?: RenderOptions) {
 }
 
 function renderSheet(
-  client: Pick<DaemonClient, "fetchRecentProviderSessions" | "importAgent">,
+  client: Pick<DaemonClient, "fetchRecentProviderSessions" | "importAgent"> & {
+    invokePluginRpc?: DaemonClient["invokePluginRpc"];
+  },
   options?: RenderOptions,
 ) {
   applyHostMocks(options);
@@ -1309,5 +1312,66 @@ describe("ImportSessionSheet", () => {
     await waitFor(() => {
       expect(fetchRecentProviderSessions).toHaveBeenCalledTimes(2);
     });
+  });
+
+  it("imports every session in a checked DeepSeek Harness workspace", async () => {
+    const fetchRecentProviderSessions = vi.fn(
+      async (options?: { cwd?: string; providers?: string[]; limit?: number }) => {
+        if (options?.cwd === "/work/demo") {
+          return {
+            requestId: "workspace-sessions",
+            entries: [
+              createProviderSessionEntry({
+                providerId: "dsh",
+                providerLabel: "DeepSeek Harness",
+                providerHandleId: "plugin:session",
+                cwd: "/work/demo",
+                title: "Bring this chat",
+              }),
+            ],
+          };
+        }
+        return { requestId: "recent-provider-sessions", entries: [] };
+      },
+    );
+    const importAgent = vi.fn(async () => createImportedAgentSnapshot("agent-dsh"));
+    const invokePluginRpc = vi.fn(async () => ({
+      workspaces: [
+        {
+          id: "w1",
+          title: "Demo",
+          path: "/work/demo",
+          updatedAt: "2026-11-09T00:00:00.000Z",
+          sessionCount: 1,
+        },
+      ],
+    }));
+    const onImported = vi.fn();
+
+    renderSheet(
+      { fetchRecentProviderSessions, importAgent, invokePluginRpc },
+      {
+        onImported,
+        snapshot: { supportsSnapshot: true, entries: [createSnapshotEntry("dsh")] },
+      },
+    );
+
+    await screen.findByText("Demo");
+    fireEvent.click(screen.getByTestId("import-session-workspace-w1"));
+    fireEvent.click(screen.getByTestId("import-session-workspaces-import"));
+
+    await waitFor(() => {
+      expect(importAgent).toHaveBeenCalledWith({
+        providerId: "dsh",
+        providerHandleId: "plugin:session",
+        cwd: "/work/demo",
+      });
+    });
+    expect(fetchRecentProviderSessions).toHaveBeenCalledWith({
+      cwd: "/work/demo",
+      providers: ["dsh"],
+      limit: 200,
+    });
+    expect(onImported).toHaveBeenCalledWith(expect.objectContaining({ id: "agent-dsh" }));
   });
 });

@@ -456,6 +456,16 @@ export const zhCN: TranslationResources = {
     row: {
       importing: "正在导入...",
     },
+    workspaces: {
+      title: "DeepSeek Harness 工作区",
+      sessions: "{{count}} 个会话",
+      import: "导入所选工作区",
+      importing: "正在导入 {{done}}/{{total}}",
+      unavailable: "无法读取 DeepSeek Harness 工作区。",
+      alreadyImported: "所选工作区的会话都已导入。",
+      failed: "无法导入所选工作区。",
+      partial: "已导入 {{done}} 个，{{failed}} 个失败。",
+    },
   },
   workspace: {
     route: {
