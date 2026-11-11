@@ -1712,6 +1712,7 @@ export const es: TranslationResources = {
     chooseModelForCommands: "Selecciona un modelo para ver los comandos",
   },
   loadOlderHistory: {
+    action: "Cargar antes",
     failed: "No se pudo cargar el historial anterior",
   },
   imageAttachmentPicker: {

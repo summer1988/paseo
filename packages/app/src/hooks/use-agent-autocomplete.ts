@@ -36,7 +36,7 @@ import {
 interface UseAgentAutocompleteInput {
   userInput: string;
   cursorIndex: number;
-  setUserInput: (nextValue: string) => void;
+  setUserInput: (nextValue: string, selection?: { start: number; end: number }) => void;
   serverId: string;
   agentId: string;
   draft?: DraftCommandTarget;
@@ -730,7 +730,8 @@ export function useAgentAutocomplete(input: UseAgentAutocompleteInput): AgentAut
         mention: current.fileMention,
         relativePath: selected.entryPath,
       });
-      setUserInput(nextInput);
+      const cursor = nextInput.length - (current.text.length - current.fileMention.end);
+      setUserInput(nextInput, { start: cursor, end: cursor });
       onAutocompleteApplied?.();
     },
     [

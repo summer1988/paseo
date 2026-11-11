@@ -88,6 +88,8 @@ import { RenderProfile } from "@/utils/render-profiler";
 import { useComposerHeight } from "./height";
 import { ComposerInputPresentation } from "./presentation";
 import { resolveComposerInputMode, type ComposerInputMode } from "@/composer/input-mode";
+import { FileMentionText } from "@/components/file-mention-text";
+import { fileMentionRuns } from "@/utils/file-mention-autocomplete";
 import { pasteLinkedClipboardText } from "@/composer/pasted-text";
 import type { NativePastedFile } from "@/composer/native-pasted-image";
 import {
@@ -98,6 +100,7 @@ import {
 
 const ComposerTextInput = withUnistyles(EditingTextInput, (theme) => ({
   placeholderTextColor: theme.colors.surface4,
+  cursorColor: theme.colors.foreground,
 }));
 import {
   resolveSendTooltipLabel,
@@ -722,6 +725,11 @@ interface ComposerTextSurfaceProps {
   focusHintLabel: string;
 }
 
+function webHost(node: unknown): HTMLElement | null {
+  if (!isWeb || node == null || typeof node !== "object" || !("style" in node)) return null;
+  return node as unknown as HTMLElement;
+}
+
 /**
  * The composer's content: an editable input, or static text when there is
  * nothing to type. Both sit in the same bordered surface, so read-only is a
@@ -730,32 +738,85 @@ interface ComposerTextSurfaceProps {
 function ComposerTextSurface(props: ComposerTextSurfaceProps): React.ReactElement {
   const { onChangeText, onRenderedLinesChange } = props;
   const [measurementText, setMeasurementText] = useState(props.value);
+  const overlayRef = useRef<View>(null);
+  const composingRef = useRef(false);
   useEffect(() => {
-    if (!isWeb) setMeasurementText(props.value);
+    if (composingRef.current) return;
+    setMeasurementText((current) => {
+      if (!isWeb || fileMentionRuns(props.value) || fileMentionRuns(current)) return props.value;
+      return current;
+    });
   }, [props.value, props.textReplacementKey]);
   const handleTextChange = useCallback(
     (text: string) => {
-      if (!isWeb) setMeasurementText(text);
+      if (!composingRef.current) {
+        setMeasurementText((current) => {
+          if (!isWeb || fileMentionRuns(text) || fileMentionRuns(current)) return text;
+          return current;
+        });
+      }
       onChangeText(text);
     },
-    [onChangeText, setMeasurementText],
+    [onChangeText],
   );
+  const handleScroll = useCallback(
+    (event: { nativeEvent: { contentOffset?: { y: number }; target?: EventTarget | null } }) => {
+      const target = event.nativeEvent.target;
+      const fromTarget =
+        target != null && "scrollTop" in target && typeof target.scrollTop === "number"
+          ? target.scrollTop
+          : 0;
+      const next = event.nativeEvent.contentOffset?.y ?? fromTarget;
+      const overlay = webHost(overlayRef.current);
+      if (!overlay) return;
+      overlay.style.transform = next > 0 ? `translateY(-${next}px)` : "";
+    },
+    [],
+  );
+  const hideOverlayWhileComposing = useCallback((composing: boolean) => {
+    composingRef.current = composing;
+    const overlay = webHost(overlayRef.current);
+    if (!overlay) return;
+    overlay.style.visibility = composing ? "hidden" : "";
+  }, []);
   const measureLines = useCallback(
     (event: import("react-native").TextLayoutEvent) =>
       onRenderedLinesChange(event.nativeEvent.lines.length),
     [onRenderedLinesChange],
   );
+  const paintMentions = fileMentionRuns(measurementText) !== null;
+  const inputStyle = useMemo(
+    () => (paintMentions ? [props.textInputStyle, styles.mentionInput] : props.textInputStyle),
+    [paintMentions, props.textInputStyle],
+  );
+  const mentionTextStyle = useMemo(
+    () => [props.textInputStyle, styles.mentionOverlayText],
+    [props.textInputStyle],
+  );
   if (props.readOnly) {
     return (
       <View style={styles.textInputScrollWrapper}>
-        <Text style={props.readOnlyTextStyle} testID="composer-readonly-content">
-          {props.value}
-        </Text>
+        <FileMentionText
+          text={props.value}
+          surface="composer"
+          style={props.readOnlyTextStyle}
+          testID="composer-readonly-content"
+        />
       </View>
     );
   }
   return (
     <View style={[styles.textInputScrollWrapper, props.fullscreen && styles.fullscreenTextSurface]}>
+      {paintMentions ? (
+        <View ref={overlayRef} pointerEvents="none" style={styles.mentionOverlay}>
+          <FileMentionText
+            text={measurementText}
+            surface="composer"
+            accessible={false}
+            style={mentionTextStyle}
+          />
+        </View>
+      ) : null}
       {!isWeb && props.compact && !props.fullscreen ? (
         <Text
           accessible={false}
@@ -775,10 +836,12 @@ function ComposerTextSurface(props: ComposerTextSurfaceProps): React.ReactElemen
         accessibilityLabel={props.accessibilityLabel}
         onFocus={props.onFocus}
         onBlur={props.onBlur}
-        style={props.textInputStyle}
+        style={inputStyle}
         multiline
         scrollEnabled={props.scrollEnabled}
+        onScroll={paintMentions ? handleScroll : undefined}
         editable={props.editable}
+        onCompositionChange={hideOverlayWhileComposing}
         onKeyPress={props.onKeyPress}
         onSelectionChange={props.onSelectionChange}
         onPasteImages={props.onPasteImages}
@@ -1372,6 +1435,7 @@ export const MessageInput = forwardRef<MessageInputRef, MessageInputProps>(
     paneFocusedRef.current = isPaneFocused;
     const [webTextArea, setWebTextArea] = useState<HTMLElement | null>(null);
     const appliedTextReplacementKeyRef = useRef(textReplacement.key);
+    const [mentionPaintRevision, setMentionPaintRevision] = useState(0);
     const webTextareaRef = useRef<HTMLElement | null>(null);
     const updateLiveTextPresence = useCallback((text: string) => {
       const nextHasLiveText = text.trim().length > 0;
@@ -1471,6 +1535,9 @@ export const MessageInput = forwardRef<MessageInputRef, MessageInputProps>(
           textInputRef.current?.replaceText(nextText, selection);
         }
         onChangeText(nextText);
+        // The web field owns its text. A file pick writes it without rendering, so the
+        // colored mention waits for the next render (Tab leaving the field) unless this bumps.
+        setMentionPaintRevision((revision) => revision + 1);
       },
       [onChangeText, updateComposerHeightForText, updateLiveTextPresence],
     );
@@ -2143,7 +2210,7 @@ export const MessageInput = forwardRef<MessageInputRef, MessageInputProps>(
                     appliedTextReplacementKeyRef.current,
                   )
             }
-            textReplacementKey={textReplacement.key}
+            textReplacementKey={`${textReplacement.key}:${mentionPaintRevision}`}
             textInputRef={assignTextInput}
             textInputStyle={textInputStyle}
             readOnlyTextStyle={readOnlyTextStyle}
@@ -2173,6 +2240,7 @@ export const MessageInput = forwardRef<MessageInputRef, MessageInputProps>(
       [
         readOnly,
         textReplacement,
+        mentionPaintRevision,
         assignTextInput,
         textInputStyle,
         readOnlyTextStyle,
@@ -2421,6 +2489,25 @@ const styles = StyleSheet.create((theme: Theme) => ({
   textInputScrollWrapper: {
     flexShrink: 1,
     position: "relative",
+    minHeight: MIN_INPUT_HEIGHT,
+  },
+  // Out of flow. The field keeps its own height; this box must not copy it.
+  mentionOverlay: {
+    position: "absolute",
+    top: 0,
+    left: 0,
+    right: 0,
+  },
+  mentionOverlayText: {
+    flexShrink: 0,
+    height: undefined,
+    minHeight: undefined,
+    maxHeight: undefined,
+  },
+  mentionInput: {
+    color: "transparent",
+    backgroundColor: "transparent",
+    ...(isWeb ? ({ caretColor: theme.colors.foreground } as object) : {}),
   },
   focusHintText: {
     position: "absolute",
@@ -2432,7 +2519,9 @@ const styles = StyleSheet.create((theme: Theme) => ({
   },
   textInput: {
     // Preserve the controls when an ancestor constrains an overlong draft.
+    // The floor is one line: without it the field flex-shrinks to a sliver.
     flexShrink: 1,
+    minHeight: MIN_INPUT_HEIGHT,
     width: "100%",
     color: theme.colors.foreground,
     fontSize: theme.fontSize.content,

@@ -65,13 +65,16 @@ describe("history start pagination", () => {
     expect(h.settles).toBe(1);
     h.pagination.dispose();
   });
-  it("continues short pages and reveals on exhaustion", async () => {
+  it("stops after one short page until the reader asks for the next", async () => {
     const h = harness();
     h.pagination.update();
     h.set({ progressKey: "10" });
     h.requests[0](true);
     await Promise.resolve();
     h.pagination.settle();
+    expect(h.requests).toHaveLength(1);
+    expect(h.pagination.state).toEqual({ status: "dormant", visible: true });
+    h.pagination.rearm();
     expect(h.requests).toHaveLength(2);
     h.set({ hasOlderHistory: false });
     h.requests[1](true);
@@ -199,8 +202,8 @@ it("keeps cached history visible after synchronization and subsequent pagination
   h.requests[0](true);
   await Promise.resolve();
   h.pagination.settle();
-  expect(h.pagination.state.visible).toBe(true);
-  expect(h.requests).toHaveLength(2);
+  expect(h.pagination.state).toEqual({ status: "dormant", visible: true });
+  expect(h.requests).toHaveLength(1);
   h.pagination.dispose();
 });
 
@@ -298,10 +301,8 @@ it.each([null, { ...initial, isReady: false }])(
       geometry = { ...initial, progressKey: "10" };
       pagination.update();
       pagination.settle();
-      expect(requests).toBe(2);
-      expect(pagination.state.status).toBe("loading");
-      vi.advanceTimersByTime(15_000);
-      expect(pagination.state.status).toBe("failed");
+      expect(requests).toBe(1);
+      expect(pagination.state.status).toBe("dormant");
     } finally {
       pagination.dispose();
       vi.useRealTimers();

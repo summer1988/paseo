@@ -6,12 +6,13 @@ import { createIdleRuntimeCleanup } from "./idle-runtime-cleanup/index.js";
 import { relative } from "node:path";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import type {
-  ProviderConnection,
-  ProviderLaunch,
-  ProviderEvent,
-  ProviderInput,
-  ProviderRegistration,
+import {
+  PROVIDER_CHILD_SUBTITLE_NOTICE,
+  type ProviderConnection,
+  type ProviderLaunch,
+  type ProviderEvent,
+  type ProviderInput,
+  type ProviderRegistration,
 } from "@getpaseo/plugin/server/provider";
 import { setImmediate as nextTurn } from "node:timers/promises";
 import { describe, expect, test } from "vitest";
@@ -1594,6 +1595,107 @@ describe("PluginAgentClientRegistry", () => {
       const events: AgentStreamEvent[] = [];
       for await (const event of session.streamHistory()) events.push(event);
       expectNestedChildren(events);
+    } finally {
+      await session.close();
+      registry.replace([]);
+    }
+  });
+
+  test("shows a child context occupancy on its subtitle", async () => {
+    const harness = createProviderHarness();
+    const registry = new PluginAgentClientRegistry(createTestLogger());
+    registry.replace([harness.registration]);
+    const session = await registry.clients()[harness.registration.id]!.createSession({
+      provider: harness.registration.id,
+      cwd: "/workspace",
+    });
+    try {
+      const events: AgentStreamEvent[] = [];
+      session.subscribe((event) => events.push(event));
+      const open = harness.inputs.find((input) => input.type === "session.open")!;
+      harness.emit({
+        type: "session.opened",
+        sessionId: "child-1",
+        parentSessionId: open.sessionId,
+        capabilities: [],
+        restoration: "parent",
+        title: "调研",
+        description: "调研",
+        cwd: "/workspace",
+      });
+      harness.emit({
+        type: "session.usage",
+        sessionId: "child-1",
+        usage: { contextWindowMaxTokens: 1_048_576 },
+      });
+      harness.emit({
+        type: "session.usage",
+        sessionId: "child-1",
+        usage: { contextWindowUsedTokens: 99_033, contextWindowMaxTokens: 1_048_576 },
+      });
+      const upserts = events.flatMap((event) =>
+        event.type === "provider_subagent" && event.event.type === "upsert" ? [event.event] : [],
+      );
+      expect(upserts.at(-1)).toMatchObject({
+        type: "upsert",
+        id: "child-1",
+        subtitle: "99k / 1M",
+      });
+      expect(upserts.at(-1)).not.toHaveProperty("status");
+    } finally {
+      await session.close();
+      registry.replace([]);
+    }
+  });
+
+  test("keeps a child subtitle notice ahead of a later usage sample", async () => {
+    const harness = createProviderHarness();
+    const registry = new PluginAgentClientRegistry(createTestLogger());
+    registry.replace([harness.registration]);
+    const session = await registry.clients()[harness.registration.id]!.createSession({
+      provider: harness.registration.id,
+      cwd: "/workspace",
+    });
+    try {
+      const events: AgentStreamEvent[] = [];
+      session.subscribe((event) => events.push(event));
+      const open = harness.inputs.find((input) => input.type === "session.open")!;
+      harness.emit({
+        type: "session.opened",
+        sessionId: "child-1",
+        parentSessionId: open.sessionId,
+        capabilities: [],
+        restoration: "parent",
+        title: "调研",
+        cwd: "/workspace",
+      });
+      harness.emit({
+        type: "session.notice",
+        sessionId: "child-1",
+        notice: {
+          id: PROVIDER_CHILD_SUBTITLE_NOTICE,
+          severity: "info",
+          title: "子会话",
+          description: "查资料 · 一次性 · 未在运行",
+        },
+      });
+      harness.emit({
+        type: "session.usage",
+        sessionId: "child-1",
+        usage: { contextWindowUsedTokens: 99_033, contextWindowMaxTokens: 1_048_576 },
+      });
+      const upserts = events.flatMap((event) =>
+        event.type === "provider_subagent" && event.event.type === "upsert" ? [event.event] : [],
+      );
+      expect(upserts.at(-1)).toMatchObject({ subtitle: "查资料 · 一次性 · 未在运行" });
+      expect(
+        events.some(
+          (event) =>
+            event.type === "timeline" &&
+            event.item.type === "notification" &&
+            event.item.message.includes("未在运行"),
+        ),
+      ).toBe(false);
     } finally {
       await session.close();
       registry.replace([]);

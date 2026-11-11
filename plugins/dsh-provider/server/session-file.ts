@@ -23,11 +23,24 @@ export interface SessionStore {
   read(): Promise<SavedSession | undefined>;
   write(session: SavedSession): Promise<void>;
   clear(): Promise<void>;
+  /** Removes the file only when it still contains this login. */
+  clearMatching(session: SavedSession): Promise<void>;
 }
 
 /** Daemon-only login. The settings RPC never receives this file. */
 export class SessionFile implements SessionStore {
+  private chain: Promise<void> = Promise.resolve();
+
   constructor(private readonly file: string) {}
+
+  private enqueue(operation: () => Promise<void>): Promise<void> {
+    const result = this.chain.then(operation, operation);
+    this.chain = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
+  }
 
   async read(): Promise<SavedSession | undefined> {
     let raw: string;
@@ -56,19 +69,38 @@ export class SessionFile implements SessionStore {
     if (!loopbackOrigin(session.origin)) {
       throw new Error("The saved login host must be loopback");
     }
-    const raw = JSON.stringify({ version: 1, ...session });
-    await mkdir(path.dirname(this.file), { recursive: true });
-    const temporary = `${this.file}.${randomUUID()}.tmp`;
-    try {
-      await writeFile(temporary, raw, { mode: 0o600 });
-      await rename(temporary, this.file);
-    } finally {
-      await rm(temporary, { force: true });
-    }
+    await this.enqueue(async () => {
+      const raw = JSON.stringify({ version: 1, ...session });
+      await mkdir(path.dirname(this.file), { recursive: true });
+      const temporary = `${this.file}.${randomUUID()}.tmp`;
+      try {
+        await writeFile(temporary, raw, { mode: 0o600 });
+        await rename(temporary, this.file);
+      } finally {
+        await rm(temporary, { force: true });
+      }
+    });
   }
 
   async clear(): Promise<void> {
-    await rm(this.file, { force: true });
+    await this.enqueue(async () => {
+      await rm(this.file, { force: true });
+    });
+  }
+
+  async clearMatching(session: SavedSession): Promise<void> {
+    await this.enqueue(async () => {
+      const current = await this.read();
+      if (
+        !current ||
+        current.installId !== session.installId ||
+        current.origin !== session.origin ||
+        current.cookie !== session.cookie
+      ) {
+        return;
+      }
+      await rm(this.file, { force: true });
+    });
   }
 }
 

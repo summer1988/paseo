@@ -1700,6 +1700,7 @@ export const en = {
     chooseModelForCommands: "Select a model to see commands",
   },
   loadOlderHistory: {
+    action: "Load earlier",
     failed: "Couldn't load older history",
   },
   imageAttachmentPicker: {

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   applyFileMentionReplacement,
+  fileMentionRuns,
   findActiveFileMention,
   formatQuotedFileMentionPath,
 } from "./file-mention-autocomplete";
@@ -121,7 +122,7 @@ describe("findActiveFileMention", () => {
 describe("formatQuotedFileMentionPath", () => {
   it("quotes workspace-relative paths using file mention escaping", () => {
     expect(formatQuotedFileMentionPath('src/changed "file".ts')).toBe(
-      '"src/changed \\"file\\".ts"',
+      '"@src/changed \\"file\\".ts"',
     );
   });
 });
@@ -134,7 +135,7 @@ describe("applyFileMentionReplacement", () => {
       mention: { start: 5, end: 13, query: "src/com" },
       relativePath: "src/components/chat.tsx",
     });
-    expect(next).toBe('open "src/components/chat.tsx" next');
+    expect(next).toBe('open "@src/components/chat.tsx" next');
   });
 
   it("escapes double quotes in replacement path", () => {
@@ -144,6 +145,36 @@ describe("applyFileMentionReplacement", () => {
       mention: { start: 0, end: 4, query: "foo" },
       relativePath: 'src/"quoted".ts',
     });
-    expect(next).toBe('"src/\\"quoted\\".ts"');
+    expect(next).toBe('"@src/\\"quoted\\".ts"');
+  });
+});
+
+describe("fileMentionRuns", () => {
+  it("leaves prose and ordinary quotes as text", () => {
+    expect(fileMentionRuns("see @file")).toBeNull();
+    expect(fileMentionRuns('say "hello"')).toBeNull();
+    expect(fileMentionRuns('see "src/a.ts today"')).toBeNull();
+  });
+
+  it("paints a completed mention and a legacy path, and hides the marker", () => {
+    expect(fileMentionRuns('open "@src/components/chat.tsx" now')).toEqual([
+      { kind: "text", text: "open " },
+      { kind: "pad", text: '"' },
+      { kind: "pad", text: "@" },
+      { kind: "path", text: "src/components/chat.tsx" },
+      { kind: "pad", text: '"' },
+      { kind: "text", text: " now" },
+    ]);
+    expect(fileMentionRuns('"README.md"')).toEqual([
+      { kind: "pad", text: '"' },
+      { kind: "path", text: "README.md" },
+      { kind: "pad", text: '"' },
+    ]);
+    expect(fileMentionRuns('"@src"')).toEqual([
+      { kind: "pad", text: '"' },
+      { kind: "pad", text: "@" },
+      { kind: "path", text: "src" },
+      { kind: "pad", text: '"' },
+    ]);
   });
 });

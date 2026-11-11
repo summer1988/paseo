@@ -45,9 +45,15 @@ Paseo does not read another process's output, Electron IPC, or cookie store to o
 
 Sign in with the client whose home you selected. A missing credential surfaces as `session/provider-credentials-unavailable`. If another client is already writing a session, Paseo shows `session/writer-held` and does not open a blank replacement.
 
+A new chat is created inside the DeepSeek workspace for the Paseo folder, so DSH NEXT lists it with that folder. It starts with workspace write. The access control beside the mode switches that session between workspace write and full access. Resuming a session leaves its workspace alone.
+
 ## Import workspaces
 
 Open Import session. When DeepSeek Harness is connected, the sheet lists its workspaces. Check the ones to bring in. Paseo imports each user session in those directories into the workspace for that directory. Archived sessions, blank sessions, and subagent sessions stay out. A workspace import stops at 200 sessions, the import page limit.
+
+## Team
+
+Subagents and teammates show in that chat's subagents track. The list is the session catalog, so a child that has scrolled off the recent log page is still there, and its timeline includes the older pages of its own log. The row name is the catalog label, or the session id when a one-shot child has no label. Status follows the host: running while the host says so, completed when the child is idle and its last turn finished, and not running when it is idle for any other reason. A turn that ended in error does not mark the child failed. A teammate whose phase is failed stays failed. The subtitle is the session title, the mode, that activity, the token total, and how long the child has been active. An approval asked by a child appears on the parent chat under that child's name. Shared team tasks show in the task list with their pending, in-progress, or completed status, and a deleted task leaves the list. Other plugins read the same roster with `dsh.session.roster`, passing the DeepSeek session id or the provider session id. `dsh.session.roster.watch` pushes the roster when it changes.
 
 ## Limits
 

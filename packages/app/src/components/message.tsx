@@ -9,6 +9,7 @@ import {
   AttachmentLabel,
   AttachmentThumbnail,
 } from "@/components/attachment-pill";
+import { FileMentionText } from "@/components/file-mention-text";
 import { MarkdownRenderer } from "@/components/markdown/renderer";
 import { useRetainedPanelActive } from "@/components/retained-panel";
 import { RewindMenu, type RewindMode } from "@/components/rewind/rewind-menu";
@@ -512,9 +513,13 @@ export const UserMessage = memo(function UserMessage({
               </View>
             ) : null}
             {hasText ? (
-              <Text selectable style={userMessageStylesheet.text} dataSet={MESSAGE_TEXT_DATASET}>
-                {message}
-              </Text>
+              <FileMentionText
+                text={message}
+                surface="bubble"
+                selectable
+                style={userMessageStylesheet.text}
+                dataSet={MESSAGE_TEXT_DATASET}
+              />
             ) : null}
           </MessagePreview>
         </View>

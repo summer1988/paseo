@@ -100,7 +100,7 @@ function summaryRow(
 }
 
 function staysVisibleWhenCollapsed(item: StreamItem): boolean {
-  return isTurnTrigger(item) || item.kind === "compaction";
+  return isTurnTrigger(item) || item.kind === "compaction" || isAssistantReply(item);
 }
 
 function isAssistantReply(item: StreamItem): boolean {
@@ -126,11 +126,53 @@ function findLastReplyIndex(tail: StreamItem[], start: number, end: number): num
   return -1;
 }
 
+function placeFolded(
+  items: readonly StreamItem[],
+  expanded: boolean,
+  hostId: string,
+  input: CollapseTurnsInput,
+  maps: {
+    hostIdByFoldedMessageId: Map<string, string>;
+    hostIdByHiddenRowId: Map<string, string>;
+    nestedItemIds: Set<string>;
+  },
+): StreamItem[] {
+  const revealed = expanded
+    ? items.flatMap<StreamItem>((item) =>
+        item.kind === "tool_call" || item.kind === "thought"
+          ? [...(input.getGroupedCalls(item.id) ?? [item])]
+          : [item],
+      )
+    : [...items];
+  for (const item of revealed) {
+    if (staysVisibleWhenCollapsed(item)) continue;
+    maps.hostIdByFoldedMessageId.set(getStreamItemMessageId(item), hostId);
+    if (expanded) maps.nestedItemIds.add(item.id);
+    else maps.hostIdByHiddenRowId.set(item.id, hostId);
+  }
+  return expanded ? revealed : revealed.filter((item) => staysVisibleWhenCollapsed(item));
+}
+
+function isFoldableWork(item: StreamItem): boolean {
+  return (item.kind === "tool_call" || item.kind === "thought") && !isTurnTrigger(item);
+}
+
+function replySpanEnd(tail: StreamItem[], replyIndex: number, end: number): number {
+  const messageId = getStreamItemMessageId(tail[replyIndex]!);
+  let index = replyIndex + 1;
+  while (index < end) {
+    const item = tail[index]!;
+    if (!isAssistantReply(item) || getStreamItemMessageId(item) !== messageId) break;
+    index += 1;
+  }
+  return index;
+}
+
 /**
- * Folds each answered turn behind a summary row under its user message: everything the agent
- * did before its last message collapses into that row, and the last message stays in the chat.
- * A turn folds only once it is complete, its user message is loaded, and it sent messages or
- * called tools before its reply. Reasoning is revealed only when the turn opens.
+ * Folds each answered turn behind a summary row under its user message. Tool calls and reasoning
+ * collapse into that row. Every assistant reply stays in the chat, in order. A turn folds once it
+ * is complete, has tool work, and its user message is loaded. Reasoning is revealed only when the
+ * turn opens.
  */
 export function collapseTurns(input: CollapseTurnsInput): TurnCollapse {
   const { tail } = input;
@@ -149,14 +191,17 @@ export function collapseTurns(input: CollapseTurnsInput): TurnCollapse {
       !host ||
       (host.kind !== "user_message" && host.kind !== "tool_call") ||
       !isClosed ||
-      replyIndex <= runStart
+      replyIndex < 0
     ) {
       output.push(...tail.slice(runStart, runEnd));
       return;
     }
-    const folded = tail.slice(runStart, replyIndex);
+    const replyEnd = replySpanEnd(tail, replyIndex, runEnd);
+    const before = tail.slice(runStart, replyIndex);
+    const after = tail.slice(replyEnd, runEnd);
+    const folded = [...before.filter(isFoldableWork), ...after.filter(isFoldableWork)];
     const tools = summarizeTurn(folded, input.getGroupedCalls);
-    if (!hasWork(tools) && !folded.some(isAssistantReply)) {
+    if (folded.length === 0 || !hasWork(tools)) {
       output.push(...tail.slice(runStart, runEnd));
       return;
     }
@@ -168,24 +213,28 @@ export function collapseTurns(input: CollapseTurnsInput): TurnCollapse {
       input.previousSummaryRowsByHostId.get(host.id),
     );
     summaryRowsByHostId.set(host.id, summary);
-    const revealed = expanded
-      ? folded.flatMap<StreamItem>((item) =>
-          item.kind === "tool_call" || item.kind === "thought"
-            ? [...(input.getGroupedCalls(item.id) ?? [item])]
-            : [item],
-        )
-      : folded;
-    for (const item of revealed) {
-      if (staysVisibleWhenCollapsed(item)) continue;
-      hostIdByFoldedMessageId.set(getStreamItemMessageId(item), host.id);
-      if (expanded) nestedItemIds.add(item.id);
-      else hostIdByHiddenRowId.set(item.id, host.id);
-    }
+    output.push(summary);
     output.push(
-      summary,
-      ...(expanded ? revealed : folded.filter((item) => staysVisibleWhenCollapsed(item))),
+      ...placeFolded(before, expanded, host.id, input, {
+        hostIdByFoldedMessageId,
+        hostIdByHiddenRowId,
+        nestedItemIds,
+      }),
     );
-    output.push(...tail.slice(replyIndex, runEnd));
+    output.push(...tail.slice(replyIndex, replyEnd));
+    for (const item of after) {
+      if (!isFoldableWork(item)) {
+        output.push(item);
+        continue;
+      }
+      output.push(
+        ...placeFolded([item], expanded, host.id, input, {
+          hostIdByFoldedMessageId,
+          hostIdByHiddenRowId,
+          nestedItemIds,
+        }),
+      );
+    }
   };
 
   for (let index = 0; index < tail.length; index += 1) {

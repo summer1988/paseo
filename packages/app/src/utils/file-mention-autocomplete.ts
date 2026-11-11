@@ -47,7 +47,52 @@ export function findActiveFileMention(input: FindActiveFileMentionInput): FileMe
 
 export function formatQuotedFileMentionPath(relativePath: string): string {
   const safePath = relativePath.replace(/"/g, '\\"');
-  return `"${safePath}"`;
+  // The leading @ marks a completed mention. Ordinary quotes stay prose.
+  return `"@${safePath}"`;
+}
+
+export type FileMentionRun =
+  | { kind: "text"; text: string }
+  | { kind: "pad"; text: string }
+  | { kind: "path"; text: string };
+
+export function fileMentionRuns(text: string): FileMentionRun[] | null {
+  const quotedPath = /"((?:\\.|[^"\\\n])*)"/g;
+  const runs: FileMentionRun[] = [];
+  let cursor = 0;
+  let found = false;
+  for (const match of text.matchAll(quotedPath)) {
+    const rawInner = match[1] ?? "";
+    const start = match.index ?? 0;
+    const marked = rawInner.startsWith("@");
+    const body = marked ? rawInner.slice(1) : rawInner;
+    if (!isDisplayedFileMention(body, marked)) continue;
+    found = true;
+    if (start > cursor) runs.push({ kind: "text", text: text.slice(cursor, start) });
+    runs.push({ kind: "pad", text: '"' });
+    if (marked) runs.push({ kind: "pad", text: "@" });
+    if (body.length > 0) runs.push({ kind: "path", text: body });
+    runs.push({ kind: "pad", text: '"' });
+    cursor = start + match[0].length;
+  }
+  if (!found) return null;
+  if (cursor < text.length) runs.push({ kind: "text", text: text.slice(cursor) });
+  return runs;
+}
+
+function isDisplayedFileMention(path: string, marked: boolean): boolean {
+  if (!isSafeMentionPath(path)) return false;
+  if (marked) return true;
+  if (path.includes(" ")) return false;
+  return path.includes("/") || /(?:^|\/)[^/]+\.[A-Za-z0-9]{1,12}$/.test(path);
+}
+
+function isSafeMentionPath(path: string): boolean {
+  if (!path || path.length > 512) return false;
+  if (/[\n\r\t<>|?*]/.test(path)) return false;
+  if (/[,;:!?，。！？、]/.test(path)) return false;
+  if (/^[a-z][a-z0-9+.-]*:/i.test(path)) return false;
+  return path.split("/").every((segment) => segment.length > 0);
 }
 
 export function applyFileMentionReplacement(input: ApplyFileMentionReplacementInput): string {

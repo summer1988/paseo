@@ -1,9 +1,16 @@
 import type { PluginServerContext } from "@getpaseo/plugin/server";
-import { attachInstall, listInstalls, listWorkspaces } from "./shared/contract.js";
+import {
+  attachInstall,
+  listInstalls,
+  listWorkspaces,
+  readRoster,
+  watchRoster,
+} from "./shared/contract.js";
 import { dshSettings } from "./shared/settings.js";
 import { createNodeDiscoverIO, discoverInstalls, publicInstall } from "./server/discover.js";
 import { HostPool } from "./server/host.js";
 import { createDshProvider, listConnectedWorkspaces } from "./server/provider.js";
+import { SessionRoster } from "./server/roster.js";
 import { DshError } from "./server/remote.js";
 import { defaultSessionFile } from "./server/session-file.js";
 
@@ -11,6 +18,7 @@ export default function contribute(server: PluginServerContext) {
   const settings = server.registerSettings(dshSettings);
   const pool = new HostPool();
   const sessions = defaultSessionFile();
+  const roster = new SessionRoster();
   const discover = () => discoverInstalls(createNodeDiscoverIO());
   server.handle(listInstalls, async () => ({
     installs: (await discover()).map(publicInstall),
@@ -25,6 +33,15 @@ export default function contribute(server: PluginServerContext) {
   server.handle(listWorkspaces, async () => ({
     workspaces: await listConnectedWorkspaces({ settings, pool, sessions, discover }),
   }));
-  server.registerProvider(createDshProvider({ settings, pool, sessions, discover }));
+  server.handle(readRoster, ({ sessionId }) => ({ roster: roster.read(sessionId) }));
+  server.handle(watchRoster, ({ sessionId }, { push, signal }) => {
+    const current = roster.read(sessionId);
+    if (current) void push(current);
+    const stop = roster.subscribe((next) => {
+      if (next.sessionId === sessionId || next.providerSessionId === sessionId) void push(next);
+    });
+    signal.addEventListener("abort", stop, { once: true });
+  });
+  server.registerProvider(createDshProvider({ settings, pool, sessions, discover, roster }));
   return () => pool.closeAll();
 }

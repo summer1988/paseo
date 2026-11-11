@@ -76,10 +76,12 @@ describe("collapseTurns", () => {
     expect(ids(result.tail)).toEqual([
       "prompt",
       "turn-summary:prompt",
+      "acknowledgment",
       "math/final/left",
       "math/final/right",
     ]);
-    expect(result.hostIdByFoldedMessageId.get("acknowledgment")).toBe("prompt");
+    expect(result.hostIdByFoldedMessageId.has("acknowledgment")).toBe(false);
+    expect(result.hostIdByHiddenRowId.get("call")).toBe("prompt");
     expect(result.hostIdByFoldedMessageId.has("final")).toBe(false);
     const expanded = collapse(items, { expandedHostIds: new Set(["prompt"]) });
     expect(ids(expanded.tail)).toEqual([
@@ -90,13 +92,14 @@ describe("collapseTurns", () => {
       "math/final/left",
       "math/final/right",
     ]);
-    expect([...expanded.nestedItemIds]).toEqual(["acknowledgment", "call"]);
+    expect([...expanded.nestedItemIds]).toEqual(["call"]);
   });
 
-  it("folds intermediate plugin replies even without tool calls", () => {
-    const result = collapse([user("prompt"), pluginReply("intermediate"), pluginReply("final")]);
-    expect(ids(result.tail)).toEqual(["prompt", "turn-summary:prompt", "math/final/0"]);
-    expect(result.hostIdByFoldedMessageId.get("intermediate")).toBe("prompt");
+  it("leaves intermediate replies in place when a turn has no tool work", () => {
+    const items = [user("prompt"), pluginReply("intermediate"), pluginReply("final")];
+    const result = collapse(items);
+    expect(result.tail).toEqual(items);
+    expect(result.summaryRowsByHostId.size).toBe(0);
   });
 
   it.each([undefined, "thought", "tool_call"] as const)(
@@ -191,6 +194,17 @@ describe("collapseTurns", () => {
     });
   });
 
+  it("folds a shell that lands after the last reply", () => {
+    const result = collapse([user("u1"), reply("final"), shell("bash")]);
+    expect(ids(result.tail)).toEqual(["u1", "turn-summary:u1", "final"]);
+    expect(result.hostIdByHiddenRowId.get("bash")).toBe("u1");
+    expect(result.summaryRowsByHostId.get("u1")?.tools).toMatchObject({ commandCount: 1 });
+    const opened = collapse([user("u1"), shell("early"), reply("final"), shell("late")], {
+      expandedHostIds: new Set(["u1"]),
+    });
+    expect(ids(opened.tail)).toEqual(["u1", "turn-summary:u1", "early", "final", "late"]);
+  });
+
   it("folds a finished turn's work into a summary row under its user message and keeps the reply", () => {
     const result = collapse([
       user("u1"),
@@ -201,7 +215,7 @@ describe("collapseTurns", () => {
       reply("final"),
     ]);
 
-    expect(ids(result.tail)).toEqual(["u1", "turn-summary:u1", "final"]);
+    expect(ids(result.tail)).toEqual(["u1", "turn-summary:u1", "early", "final"]);
     expect(result.tail[1]).toEqual({
       kind: "turn_summary",
       id: "turn-summary:u1",
@@ -211,7 +225,8 @@ describe("collapseTurns", () => {
       tools: expect.objectContaining({ commandCount: 2 }),
     });
     expect(result.summaryRowsByHostId.get("u1")).toBe(result.tail[1]);
-    expect(result.hostIdByFoldedMessageId.get("early")).toBe("u1");
+    expect(result.hostIdByFoldedMessageId.has("early")).toBe(false);
+    expect(result.hostIdByHiddenRowId.get("c1")).toBe("u1");
   });
 
   it("shows an expanded turn's work as nested rows between the prompt and the reply", () => {
@@ -233,7 +248,7 @@ describe("collapseTurns", () => {
     expect([...result.summaryRowsByHostId.keys()]).toEqual(["u1"]);
   });
 
-  it("keeps rows after the reply, and turns with no work before the reply, as they are", () => {
+  it("folds a shell after the reply and leaves a reply with no surrounding work", () => {
     const result = collapse([
       user("u1"),
       shell("c1"),
@@ -243,7 +258,9 @@ describe("collapseTurns", () => {
       reply("r2"),
     ]);
 
-    expect(ids(result.tail)).toEqual(["u1", "turn-summary:u1", "r1", "after", "u2", "r2"]);
+    expect(ids(result.tail)).toEqual(["u1", "turn-summary:u1", "r1", "u2", "r2"]);
+    expect(result.hostIdByHiddenRowId.get("after")).toBe("u1");
+    expect(result.summaryRowsByHostId.get("u1")?.tools).toMatchObject({ commandCount: 2 });
     expect([...result.summaryRowsByHostId.keys()]).toEqual(["u1"]);
   });
 

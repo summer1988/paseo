@@ -9,8 +9,13 @@ function message(id: string, kind: "user_message" | "assistant_message"): Stream
   return { id, kind, text: id, timestamp: new Date() };
 }
 
+function atBottom(): boolean {
+  return true;
+}
+
 afterEach(() => {
   Reflect.deleteProperty(globalThis, "__PASEO_E2E_WEB_MOUNTED_RECENT_STREAM_ITEMS");
+  Reflect.deleteProperty(globalThis, "__PASEO_E2E_WEB_MOUNTED_STREAM_ITEM_CAP");
 });
 
 describe("useStreamHistoryWindow", () => {
@@ -129,6 +134,75 @@ describe("useStreamHistoryWindow", () => {
       ],
     });
     expect(result.current.start).toBe(4);
+  });
+
+  it("keeps only the latest page while the reader follows a long run", async () => {
+    Object.defineProperty(globalThis, "__PASEO_E2E_WEB_MOUNTED_STREAM_ITEM_CAP", {
+      value: 4,
+      configurable: true,
+    });
+    const first = [
+      message("u1", "user_message"),
+      message("a1", "assistant_message"),
+      message("u2", "user_message"),
+      message("a2", "assistant_message"),
+    ];
+    const { result, rerender } = renderHook(
+      ({ history }) =>
+        useStreamHistoryWindow({
+          items: history,
+          loadRemoteOlder: vi.fn(),
+          isNearBottom: atBottom,
+        }),
+      { initialProps: { history: first } },
+    );
+
+    expect(result.current.start).toBe(0);
+    const grown = [...first, message("u3", "user_message"), message("a3", "assistant_message")];
+    rerender({ history: grown });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(result.current.start).toBe(2);
+    expect(result.current.hasLocalHistory).toBe(true);
+  });
+
+  it("does not drop loaded history while the reader is away from the tail", async () => {
+    Object.defineProperty(globalThis, "__PASEO_E2E_WEB_MOUNTED_STREAM_ITEM_CAP", {
+      value: 2,
+      configurable: true,
+    });
+    let nearBottom = true;
+    const items = [
+      message("u1", "user_message"),
+      message("a1", "assistant_message"),
+      message("u2", "user_message"),
+      message("a2", "assistant_message"),
+    ];
+    const { result, rerender } = renderHook(
+      ({ history }) =>
+        useStreamHistoryWindow({
+          items: history,
+          loadRemoteOlder: vi.fn(),
+          isNearBottom: () => nearBottom,
+        }),
+      { initialProps: { history: items } },
+    );
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(result.current.start).toBe(2);
+
+    nearBottom = false;
+    rerender({
+      history: [...items, message("u3", "user_message"), message("a3", "assistant_message")],
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(result.current.start).toBe(2);
+    await act(async () => result.current.loadOlder());
+    expect(result.current.start).toBe(0);
   });
 
   it("does not claim to reveal a missing or already-visible item", () => {

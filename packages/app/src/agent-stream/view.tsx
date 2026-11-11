@@ -553,6 +553,7 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
     } = useStreamHistoryWindow({
       items: presentation.tail,
       loadRemoteOlder,
+      isNearBottom: nearBottom.get,
     });
     const isLoadingOlder = remoteIsLoadingOlder;
     const hasOlder = hasLocalHistory || remoteHasOlder;

@@ -3,6 +3,12 @@ import { z } from "zod";
 
 export const PROVIDER_PROTOCOL_VERSION = 1 as const;
 
+/**
+ * Child `session.notice` id whose description is the track subtitle.
+ * It is not a timeline notification, and a later `session.usage` does not replace it.
+ */
+export const PROVIDER_CHILD_SUBTITLE_NOTICE = "paseo.subagent.subtitle";
+
 export const PROVIDER_CAPABILITIES = [
   "prompt.message",
   "prompt.command",

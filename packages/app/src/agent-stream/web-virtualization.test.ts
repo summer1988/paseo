@@ -92,6 +92,15 @@ describe("findMountedWindowStart", () => {
     ).toBe(0);
   });
 
+  it("stops a long run at the mounted cap instead of rewinding through the whole turn", () => {
+    const items = Array.from({ length: 600 }, (_, index) => ({
+      ...assistantMessage(`a${index}`, index + 1),
+      turnId: "run",
+    }));
+
+    expect(findMountedWindowStart({ items, minMountedCount: 20 })).toBe(100);
+  });
+
   it("rewinds to the previous user boundary when the cutoff lands inside a turn", () => {
     const items: StreamItem[] = [];
     for (let index = 0; index < 30; index += 1) {

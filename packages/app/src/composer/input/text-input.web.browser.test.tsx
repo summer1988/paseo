@@ -66,6 +66,12 @@ function typeFromIme(textarea: HTMLTextAreaElement, text: string): void {
 
 function ignoreTextChange(): void {}
 
+const compositionPhases: boolean[] = [];
+
+function recordCompositionPhase(composing: boolean): void {
+  compositionPhases.push(composing);
+}
+
 function createTextRecorder(): TextRecorder {
   const changes: string[] = [];
   return {
@@ -144,6 +150,35 @@ describe("ComposerTextInput web IME composition", () => {
 
     expect(mounted.textarea.value).toBe("locally typed");
     expect(recorder.changes).toEqual(["locally typed"]);
+  });
+
+  it("reports composition so the field can show the IME candidate", () => {
+    compositionPhases.length = 0;
+    const inputRef = React.createRef<ComposerTextInputHandle>();
+    const mounted = mountInput(ignoreTextChange, inputRef);
+
+    act(() => {
+      mounted.root.render(
+        <ComposerTextInput
+          ref={inputRef}
+          initialValue=""
+          multiline={true}
+          onChangeText={ignoreTextChange}
+          onCompositionChange={recordCompositionPhase}
+          testID="composer-input"
+        />,
+      );
+    });
+
+    act(() => {
+      dispatchComposition(mounted.textarea, "compositionstart");
+      expect(mounted.textarea.style.color).toBe("var(--colors-foreground, CanvasText)");
+      mounted.textarea.value = "中";
+      dispatchComposition(mounted.textarea, "compositionend");
+    });
+
+    expect(mounted.textarea.style.color).toBe("");
+    expect(compositionPhases).toEqual([true, false]);
   });
 
   it("keeps the DOM-owned candidate during composition and reports the committed text", () => {

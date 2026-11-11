@@ -239,7 +239,6 @@ function NativeStreamViewport(props: StreamRenderInput & { strategy: StreamStrat
     () => historyStartPagination.state.status === "settling",
   );
   const finishInitialFill = useStableEvent(() => historyStartPagination.reveal());
-  const retryHistoryStart = useStableEvent(() => historyStartPagination.rearm());
   const scheduleHistoryStartSettle = useStableEvent(() => {
     let scheduler = historyStartSettleSchedulerRef.current;
     if (!scheduler) {
@@ -390,6 +389,10 @@ function NativeStreamViewport(props: StreamRenderInput & { strategy: StreamStrat
   const shouldRestorePosition = useStableEvent((item: StreamItem) => {
     const anchorRowId = disclosureHold.anchorRowId();
     return anchorRowId === null || item.id === anchorRowId;
+  });
+  const requestOlderFromUser = useStableEvent(() => {
+    bottomAnchorController.detachByUser();
+    historyStartPagination.rearm();
   });
   // One owner keeps the scroll offset at any moment:
   // - Before the list has placed its rows for the agent: LegendList's initial scroll to the end. It
@@ -724,13 +727,25 @@ function NativeStreamViewport(props: StreamRenderInput & { strategy: StreamStrat
         {!isLoadingOperation &&
           historyStartPaginationState.status === "failed" &&
           hasOlderHistory && (
-            <Button variant="ghost" size="sm" onPress={retryHistoryStart}>
+            <Button variant="ghost" size="sm" onPress={requestOlderFromUser}>
               {t("paneFind.retry")}
+            </Button>
+          )}
+        {!isLoadingOperation &&
+          historyStartPaginationState.status !== "failed" &&
+          hasOlderHistory && (
+            <Button
+              variant="ghost"
+              size="sm"
+              testID="load-older-history"
+              onPress={requestOlderFromUser}
+            >
+              {t("loadOlderHistory.action")}
             </Button>
           )}
       </View>
     );
-  }, [historyStartPaginationState, hasOlderHistory, retryHistoryStart, t]);
+  }, [historyStartPaginationState, hasOlderHistory, requestOlderFromUser, t]);
 
   return (
     <View style={viewportStyle}>

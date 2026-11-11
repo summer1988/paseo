@@ -1665,6 +1665,7 @@ export const ar: TranslationResources = {
     chooseModelForCommands: "اختر نموذجًا لعرض الأوامر",
   },
   loadOlderHistory: {
+    action: "تحميل الأقدم",
     failed: "تعذر تحميل السجل الأقدم",
   },
   imageAttachmentPicker: {

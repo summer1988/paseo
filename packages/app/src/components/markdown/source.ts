@@ -1,5 +1,6 @@
 import { classifyAssistantFileLink } from "@/assistant-file-links";
 import { ASSISTANT_FILE_EXTENSIONS } from "@/assistant-file-links/extensions";
+import { renderDshUiCards } from "./dsh-ui";
 import { normalizeMarkdownHtml } from "./html";
 import { gfmTable } from "micromark-extension-gfm-table";
 import { gfmTableFromMarkdown } from "mdast-util-gfm-table";
@@ -141,7 +142,7 @@ export function prepareMarkdownSource(
     forgeReferencePattern?: string;
   } = {},
 ) {
-  source = normalizeMarkdownHtml(source);
+  source = normalizeMarkdownHtml(renderDshUiCards(source));
   const images: MarkdownImage[] = [];
   let tree: Root | undefined;
   const getTree = () =>

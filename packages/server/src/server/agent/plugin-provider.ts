@@ -7,6 +7,7 @@ import type { JsonValue, ProviderOptions } from "@getpaseo/protocol/agent-types"
 import { z } from "zod";
 import {
   PROVIDER_CAPABILITIES,
+  PROVIDER_CHILD_SUBTITLE_NOTICE,
   PROVIDER_PROTOCOL_VERSION,
   ProviderEventSchema,
   ProviderInputSchema,
@@ -1202,6 +1203,8 @@ class PluginAgentSession implements AgentSession {
     { session: ProviderRuntimeSession; unsubscribe: () => void }
   >();
   private readonly childSnapshots = new Map<string, Map<string, TimelineTextSnapshot>>();
+  /** Children that published a subtitle notice. Usage must not replace that line. */
+  private readonly childOwnedSubtitles = new Set<string>();
   private unsubscribe: (() => void) | null = null;
   /** How the opened session differs from the options it was given. */
   readonly openOptionsPatch: Record<string, JsonValue>;
@@ -1749,6 +1752,23 @@ class PluginAgentSession implements AgentSession {
     };
   }
 
+  /** A subtitle notice owns the row line. Any other notice stays ignored for children. */
+  private acceptChildSubtitle(childId: string, event: ProviderEvent): boolean {
+    if (event.type === "session.notice" && event.notice.id === PROVIDER_CHILD_SUBTITLE_NOTICE) {
+      const subtitle = event.notice.description || event.notice.title;
+      if (subtitle) {
+        this.childOwnedSubtitles.add(childId);
+        this.publish({
+          type: "provider_subagent",
+          provider: this.provider,
+          event: { type: "upsert", id: childId, subtitle },
+        });
+      }
+      return true;
+    }
+    return event.type === "session.usage" && this.childOwnedSubtitles.has(childId);
+  }
+
   private acceptChildEvent(
     childId: string,
     event: ProviderEvent,
@@ -1763,6 +1783,17 @@ class PluginAgentSession implements AgentSession {
           event: { type: "timeline", id: childId, item, timestamp: event.timestamp },
         });
       }
+      return;
+    }
+    if (this.acceptChildSubtitle(childId, event)) return;
+    if (event.type === "session.usage") {
+      const subtitle = contextOccupancy(event.usage);
+      if (!subtitle) return;
+      this.publish({
+        type: "provider_subagent",
+        provider: this.provider,
+        event: { type: "upsert", id: childId, subtitle },
+      });
       return;
     }
     if (event.type === "session.turn") {
@@ -2088,6 +2119,24 @@ function toJsonObject(value: unknown, label: string): Record<string, JsonValue> 
     throw new Error(`${label} must be a JSON object`);
   }
   return encoded as Record<string, JsonValue>;
+}
+
+function contextOccupancy(usage: {
+  contextWindowUsedTokens?: number;
+  contextWindowMaxTokens?: number;
+}): string | undefined {
+  const used = usage.contextWindowUsedTokens;
+  if (typeof used !== "number" || used <= 0) return undefined;
+  const usedLabel = compactTokens(used);
+  const max = usage.contextWindowMaxTokens;
+  if (typeof max !== "number" || max <= 0) return `${usedLabel} tokens`;
+  return `${usedLabel} / ${compactTokens(max)}`;
+}
+
+function compactTokens(tokens: number): string {
+  if (tokens < 1000) return String(Math.round(tokens));
+  if (tokens < 1_000_000) return `${Math.round(tokens / 100) / 10}k`;
+  return `${Math.round(tokens / 100_000) / 10}M`;
 }
 
 function toJsonValue(value: unknown, label: string): JsonValue {

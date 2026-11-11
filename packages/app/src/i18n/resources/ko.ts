@@ -1676,6 +1676,7 @@ export const ko: TranslationResources = {
     chooseModelForCommands: "명령을 보려면 모델을 선택하세요",
   },
   loadOlderHistory: {
+    action: "이전 내용 불러오기",
     failed: "이전 기록을 불러올 수 없습니다",
   },
   imageAttachmentPicker: {

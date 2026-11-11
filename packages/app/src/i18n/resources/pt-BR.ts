@@ -1697,6 +1697,7 @@ export const ptBR: TranslationResources = {
     chooseModelForCommands: "Selecione um modelo para ver os comandos",
   },
   loadOlderHistory: {
+    action: "Carregar mais cedo",
     failed: "Não foi possível carregar o histórico mais antigo",
   },
   imageAttachmentPicker: {

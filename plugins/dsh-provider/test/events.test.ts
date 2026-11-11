@@ -1,14 +1,28 @@
 import { expect, test } from "vitest";
 import {
   completeToolCall,
+  childDuration,
+  formatChildSubtitle,
   mapAddedSession,
   mapWireEvent,
   modelId,
   parseModelId,
+  readChildProjection,
   reasoningForWrite,
+  attemptIdForAssistantSettlement,
   reduceAssistantFrame,
   rememberContextWindow,
 } from "../server/events.js";
+
+function detailOf(name: string, args: Record<string, unknown>) {
+  const event = mapWireEvent({
+    type: "tool/call",
+    seq: 1,
+    data: { callId: "call-1", name, arguments: JSON.stringify(args) },
+  });
+  const item = event.items[0];
+  return item?.type === "tool_call" ? item.detail : undefined;
+}
 
 test("writes an omitted reasoning effort for the provider default", () => {
   expect(reasoningForWrite("provider-default")).toBeUndefined();
@@ -44,8 +58,38 @@ test("maps durable session events and keeps unknown ones", () => {
     status: "running",
     detail: { type: "shell", command: "ls" },
   });
+  expect(detailOf("grep", { pattern: "foo", path: "src" })).toEqual({
+    type: "search",
+    query: "foo",
+    toolName: "grep",
+    filePaths: ["src"],
+  });
+  expect(detailOf("glob", { pattern: "**/*.ts" })).toEqual({
+    type: "search",
+    query: "**/*.ts",
+    toolName: "glob",
+  });
+  expect(detailOf("web_search", { queries: ["paseo", "dsh"] })).toEqual({
+    type: "search",
+    query: "paseo\ndsh",
+    toolName: "web_search",
+  });
+  expect(detailOf("web_fetch", { url: "https://example.com" })).toEqual({
+    type: "fetch",
+    url: "https://example.com",
+  });
+  expect(
+    detailOf("apply_patch", { input: "*** Update File: src/a.ts\n@@\n-old\n+new\n" }),
+  ).toMatchObject({ type: "edit", filePath: "src/a.ts" });
+  expect(detailOf("str_replace_editor", { command: "view", path: "src/a.ts" })).toEqual({
+    type: "read",
+    filePath: "src/a.ts",
+  });
 
   expect(mapWireEvent({ type: "plan/mode", seq: 5, data: { active: true } }).mode).toBe("plan");
+  expect(
+    mapWireEvent({ type: "permission/preset", seq: 9, data: { preset: "workspace-write" } }),
+  ).toEqual({ items: [], permission: "workspace-write" });
   expect(
     mapWireEvent({
       type: "todo/write",
@@ -180,8 +224,140 @@ test("recognizes a subagent list row", () => {
     parentSessionId: "parent",
     title: undefined,
     cwd: "/repo",
+    mode: undefined,
   });
   expect(mapAddedSession({ origin: "user", sessionId: "root" })).toBeUndefined();
+  expect(
+    mapAddedSession({
+      origin: "subagent",
+      sessionId: "child",
+      parentSessionId: "parent",
+      projections: { values: { subagent: { label: "调研", mode: "continuable" } } },
+    }),
+  ).toMatchObject({ title: "调研" });
+  expect(
+    mapWireEvent({
+      type: "subagent/catalog",
+      seq: 3,
+      data: { childId: "child", label: "调研", mode: "continuable" },
+    }).child,
+  ).toMatchObject({ sessionId: "child", title: "调研", mode: "continuable" });
+  const task = {
+    type: "user/message",
+    seq: 4,
+    data: {
+      source: { kind: "agent-message" },
+      content: [{ type: "text", text: "去做" }],
+    },
+  };
+  expect(mapWireEvent(task).items).toEqual([]);
+  expect(mapWireEvent(task, "child").items[0]).toMatchObject({ text: "去做" });
+});
+
+test("reads the child snapshot projections DSH uses for a row", () => {
+  const facts = readChildProjection({
+    values: {
+      subagent: { label: "调研", mode: "one-shot", seq: 4 },
+      title: "查资料",
+      subagentTiming: { settledMs: 3000, lastTurnCompleted: true },
+      tokenUsage: {
+        uncachedInputTokens: 1000,
+        outputTokens: 500,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+      },
+    },
+  });
+  expect(facts).toMatchObject({
+    label: "调研",
+    mode: "one-shot",
+    sessionTitle: "查资料",
+    lastTurnCompleted: true,
+    tokenTotal: 1500,
+    timing: { settledMs: 3000 },
+  });
+  expect(
+    formatChildSubtitle({
+      sessionTitle: facts.sessionTitle,
+      mode: facts.mode,
+      external: false,
+      running: false,
+      lastTurnCompleted: true,
+      tokenTotal: facts.tokenTotal,
+      durationMs: childDuration({ timing: facts.timing, running: false, now: 0 }),
+    }),
+  ).toBe("查资料 · 一次性 · 已完成 · 1.5k · 3秒");
+  expect(
+    formatChildSubtitle({
+      mode: "continuable",
+      external: false,
+      running: true,
+      lastTurnCompleted: false,
+    }),
+  ).toBe("可继续 · 正在运行");
+  expect(
+    formatChildSubtitle({
+      mode: "external",
+      external: true,
+      running: false,
+      lastTurnCompleted: false,
+    }),
+  ).toBe("外部");
+  expect(
+    formatChildSubtitle({
+      mode: "one-shot",
+      external: false,
+      running: false,
+      lastTurnCompleted: false,
+    }),
+  ).toBe("一次性 · 未在运行");
+});
+
+test("recognizes a team task and teammate without showing mailbox records", () => {
+  const task = {
+    id: "task-1",
+    revision: 2,
+    subject: "写文档",
+    description: "细节",
+    status: "in_progress",
+    blockedBy: [],
+    writeScopes: [],
+  };
+  expect(
+    mapWireEvent({
+      type: "team/task",
+      seq: 1,
+      data: { version: 1, teamId: "lead", task },
+    }).teamTask,
+  ).toMatchObject({ id: "task-1", subject: "写文档", status: "in_progress" });
+  expect(
+    mapWireEvent({
+      type: "team/member",
+      seq: 2,
+      data: {
+        version: 1,
+        teamId: "lead",
+        member: {
+          id: "mate",
+          name: "reviewer",
+          description: "看 diff",
+          provider: "dsh",
+          context: "fresh",
+          phase: "active",
+        },
+      },
+    }).child,
+  ).toMatchObject({
+    sessionId: "mate",
+    title: "reviewer",
+    description: "看 diff",
+    mode: "active",
+    kind: "teammate",
+  });
+  expect(
+    mapWireEvent({ type: "team/message/queued", seq: 3, data: { version: 1, teamId: "lead" } })
+      .items,
+  ).toEqual([]);
 });
 
 test("streams assistant text and folds the finished message onto the same row", () => {
@@ -202,6 +378,36 @@ test("streams assistant text and folds the finished message onto the same row", 
     outcome: { kind: "committed", seq: 19 },
   });
   expect(done.commit).toEqual({ seq: 19, attemptId: "a1" });
+  const open = reduceAssistantFrame(undefined, {
+    type: "start",
+    attemptId: "a1",
+    turn: 8,
+    step: 33,
+  });
+  expect(
+    attemptIdForAssistantSettlement(open.state, {
+      type: "assistant/message",
+      surfaceOp: "append",
+      data: { turn: 8, step: 33 },
+    }),
+  ).toBe("a1");
+  expect(
+    attemptIdForAssistantSettlement(open.state, {
+      type: "assistant/message",
+      surfaceOp: "append",
+      data: { turn: 8, step: 34 },
+    }),
+  ).toBeUndefined();
+  expect(
+    attemptIdForAssistantSettlement(open.state, { type: "tool/call", data: {} }),
+  ).toBeUndefined();
+  expect(
+    attemptIdForAssistantSettlement(open.state, {
+      type: "assistant/message",
+      surfaceOp: "replace",
+      data: { turn: 8, step: 33 },
+    }),
+  ).toBeUndefined();
   expect(
     mapWireEvent({
       type: "assistant/message",

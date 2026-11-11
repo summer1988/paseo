@@ -518,7 +518,10 @@ function WebStreamViewport(props: StreamRenderInput & { isMobileBreakpoint: bool
     () => historyStartPagination.state.status === "settling",
   );
   const finishInitialFill = useStableEvent(() => historyStartPagination.reveal());
-  const rearmHistoryStartFromUserIntent = useStableEvent(() => historyStartPagination.rearm());
+  const rearmHistoryStartFromUserIntent = useStableEvent(() => {
+    setFollowOutput(false);
+    historyStartPagination.rearm();
+  });
   const scheduleHistoryStartPrependSettle = useStableEvent(() => {
     let scheduler = historyStartSettleSchedulerRef.current;
     if (!scheduler) {
@@ -1314,6 +1317,17 @@ function WebStreamViewport(props: StreamRenderInput & { isMobileBreakpoint: bool
           hasOlderHistory && (
             <button type="button" onClick={rearmHistoryStartFromUserIntent}>
               {t("paneFind.retry")}
+            </button>
+          )}
+        {!isLoadingOperation &&
+          historyStartPaginationState.status !== "failed" &&
+          hasOlderHistory && (
+            <button
+              type="button"
+              data-testid="load-older-history"
+              onClick={rearmHistoryStartFromUserIntent}
+            >
+              {t("loadOlderHistory.action")}
             </button>
           )}
       </div>

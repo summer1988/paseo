@@ -57,9 +57,10 @@ Initialization timeouts guard lack of catch-up progress, not the full multi-page
 
 Opening or resuming an agent fetches the latest available turns with a soft target of 40
 projected items. Backward pages and prompt-jump windows also include whole turns, including
-all currently available rows of an active run. There is no per-turn cap: a large run can
-exceed the target. Local history mounting uses the same boundaries so revealing older rows
-does not change the collapse state of a turn already displayed.
+all currently available rows of an active run. There is no per-turn cap on the fetch: a large
+run can exceed the target. The client mounts at most 500 rows. A longer run keeps its latest
+rows on screen and leaves the earlier ones behind Load earlier. Revealing a page still prefers
+a whole turn, and stops at that cap when the turn is longer.
 
 `wholeTurns` is a preference negotiated once at the client fetch boundary. Hosts advertising
 `features.wholeTurnTimeline` receive it; other hosts receive the existing item-based request.
@@ -70,7 +71,8 @@ Source coverage still includes interleaved tool updates.
 Canonical IDs define runs. With missing IDs, human prompts, heartbeats and typed received
 agent messages each start a fallback turn. This deterministic fallback is shared by paging
 and presentation; it cannot recover historical batching or steering. An underfilled viewport
-loads older history until it fills or history is exhausted. Further history is user-driven.
+loads one older page, then waits. Further history is Load earlier, or another visit to the
+history-start threshold.
 
 A failed catch-up or subscription reconcile retries on its own, doubling from 1s to a 30s ceiling.
 A fixed 1s retry turned a persistent daemon-side refusal — a Codex thread that already has an active
@@ -83,10 +85,9 @@ user action and owns its pending state: `retrying` is a status the sync model pu
 boolean, so the button reports in-flight and the callout returns to `error` when the attempt fails.
 
 Reaching the history-start threshold loads one older page and preserves the visible content anchor.
-Cursor progress does not trigger another page. The user must leave and return to the threshold unless
-the anchored page still leaves the viewport at history start, as with short or compacted content; in
-that case pagination continues as one loading operation until the page fills the viewport or history
-is exhausted.
+Cursor progress does not trigger another page. The user must leave and return to the threshold, or
+press Load earlier, before the next page loads. Following the tail mounts at most one page; a run
+that grows past that cap drops the oldest mounted rows back behind Load earlier.
 
 ## Durable item anchors
 

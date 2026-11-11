@@ -20,6 +20,7 @@ import {
   type SettingsSource,
 } from "../server/provider.js";
 import { SessionFile } from "../server/session-file.js";
+import { SessionRoster } from "../server/roster.js";
 import { assertLoopbackLogin, createRemoteClient, exchangeLogin } from "../server/remote.js";
 import { redact } from "../server/redact.js";
 
@@ -64,7 +65,14 @@ class Script {
   failCreate = false;
   unauthorizedCatalog = false;
   failPing = false;
+  holdCatalog: Promise<void> | undefined;
+  rejectUnsupportedEffort = false;
+  childRunning = false;
+  historyPages: { records: unknown[]; hasMore: boolean }[] = [];
   catalog: unknown;
+  projections: unknown = {};
+  providers: unknown = [];
+  described: unknown = { namespaces: [] };
   sessionItems: unknown = { items: [] };
   workspaceFrame: unknown = undefined;
   async ping() {
@@ -74,6 +82,7 @@ class Script {
   }
   async call(endpoint: string, args: Record<string, unknown>) {
     this.calls.push({ endpoint, args });
+    if (endpoint === "session/modelCatalog" && this.holdCatalog) await this.holdCatalog;
     if (endpoint === "session/modelCatalog" && this.unauthorizedCatalog) {
       const { DshError } = await import("../server/remote.js");
       throw new DshError("remote", "Remote call failed with HTTP 401");
@@ -83,6 +92,7 @@ class Script {
       throw new DshError("session/writer-held", "Another client is writing this session");
     }
     if (endpoint === "session/create") return { sessionId: "dsh-1" };
+    if (endpoint === "workspace/create") return createdWorkspace(args.request);
     if (endpoint === "session/modelCatalog") {
       if (this.catalog) return this.catalog;
       return {
@@ -104,10 +114,16 @@ class Script {
     }
     if (endpoint === "skills/list")
       return { skills: [{ name: "review", description: "Review the diff" }] };
-    if (endpoint === "session/state") return { running: false, pendingInput: [], queue: [] };
+    if (endpoint === "session/state" || endpoint === "session/events") {
+      return scriptedSession(this, endpoint);
+    }
     if (endpoint === "session/fork") return { sessionId: "dsh-fork" };
     if (endpoint === "session/list") return this.sessionItems;
-    return {};
+    if (endpoint === "session/projections") return this.projections;
+    if (endpoint === "llm/listConfigurableProviders") return this.providers;
+    if (endpoint === "settings/describe") return this.described;
+    if (endpoint === "settings/mutate") return {};
+    return answerSelect(endpoint, args, this.rejectUnsupportedEffort);
   }
   async first(endpoint: string, args: Record<string, unknown>) {
     this.calls.push({ endpoint, args });
@@ -127,6 +143,50 @@ class Script {
     return () => undefined;
   }
   async close() {}
+}
+
+function scriptedSession(
+  script: Script,
+  endpoint: string,
+):
+  | { running: boolean; pendingInput: never[]; queue: never[] }
+  | { records: unknown[]; hasMore: boolean } {
+  if (endpoint === "session/state") {
+    return { running: script.childRunning, pendingInput: [], queue: [] };
+  }
+  return script.historyPages.shift() ?? { records: [], hasMore: false };
+}
+
+async function answerSelect(
+  endpoint: string,
+  args: Record<string, unknown>,
+  rejectEffort: boolean,
+): Promise<Record<string, unknown>> {
+  const request = args.request;
+  const effort =
+    request && typeof request === "object" && "reasoningEffort" in request
+      ? request.reasoningEffort
+      : undefined;
+  if (endpoint !== "session/selectModel" || !rejectEffort || !effort) return {};
+  const { DshError } = await import("../server/remote.js");
+  throw new DshError(
+    "session/model-unavailable",
+    'provider "a6api" model "gpt-6.1-sol" does not support reasoning effort "high"',
+  );
+}
+
+function createdWorkspace(request: unknown): {
+  workspace: { workspaceId: string; path: string };
+  created: true;
+} {
+  const folder =
+    request && typeof request === "object" && "path" in request && typeof request.path === "string"
+      ? request.path
+      : "/repo";
+  return {
+    workspace: { workspaceId: "ws-1", path: folder },
+    created: true,
+  };
 }
 
 function child(): ChildProcess {
@@ -185,6 +245,7 @@ function harness(
   installs: DiscoveredInstall[],
   selected: DiscoveredInstall,
   mode: "build" | "attach",
+  roster?: SessionRoster,
 ) {
   const script = new Script();
   const spawned: DiscoveredInstall[] = [];
@@ -205,6 +266,7 @@ function harness(
     settings: settings({ installId: selected.id, mode }),
     pool,
     discover: async () => installs,
+    roster,
   });
   return { script, spawned, pool, provider };
 }
@@ -221,8 +283,16 @@ test("build uses the selected install's host entry and not another dsh", async (
   });
   await until(events, (event) => event.type === "session.ready");
   expect(spawned.map((install) => install.launch?.command)).toEqual([desktop.launch?.command]);
+  expect(script.calls.find((call) => call.endpoint === "workspace/create")?.args).toEqual({
+    request: { path: "/repo" },
+  });
   expect(script.calls.find((call) => call.endpoint === "session/create")?.args).toEqual({
-    request: { cwd: "/repo" },
+    request: { workspaceId: "ws-1" },
+  });
+  expect(script.calls.find((call) => call.endpoint === "commands/execute")?.args).toEqual({
+    agentId: "dsh-1",
+    line: "/permission workspace-write",
+    submittedAttachments: [],
   });
   const commands = events.find((event) => event.type === "session.commands");
   expect(
@@ -435,6 +505,7 @@ test("model default effort is omitted, questions can be cancelled, and unknown e
     type: "waterfall",
     event: "user-questions/request",
     eventId: "question-1",
+    agentId: "dsh-1",
     request: {
       questions: [{ id: "q1", question: "Pick one", header: "Pick", options: [{ label: "A" }] }],
     },
@@ -477,7 +548,8 @@ test("approval and plan review answer the host waterfall", async () => {
     type: "waterfall",
     event: "approval/request",
     eventId: "approval-1",
-    request: { id: "approval-1", toolName: "bash", reason: "run ls" },
+    agentId: "dsh-1",
+    request: { toolName: "bash", reason: "run ls" },
   });
   const permission = await until(events, (event) => event.type === "session.permission");
   expect(permission).toMatchObject({ request: { kind: "tool", id: "approval-1" } });
@@ -491,6 +563,132 @@ test("approval and plan review answer the host waterfall", async () => {
   expect(script.calls.find((call) => call.endpoint === "$events/result")?.args).toMatchObject({
     outcome: { kind: "result", value: "allowed-once" },
   });
+  await connection.close();
+});
+
+test("team tasks and teammates are visible to Paseo and the roster", async () => {
+  const roster = new SessionRoster();
+  const { script, provider } = harness([desktop], desktop, "build", roster);
+  const { connection, events } = await open(provider, script);
+  await connection.send({
+    type: "session.open",
+    requestId: "open-1",
+    sessionId: "paseo-1",
+    history: "skip",
+    config: { cwd: "/repo", env: {}, mcpServers: {}, settings: {}, persist: true },
+  });
+  await until(events, (event) => event.type === "session.ready");
+  const lead = script.follows[0];
+  const task = (status: string, id: string) => ({
+    type: "event" as const,
+    event: {
+      type: "team/task",
+      seq: 1,
+      data: {
+        version: 1,
+        teamId: "dsh-1",
+        task: {
+          id,
+          revision: 1,
+          subject: id === "task-1" ? "写文档" : "已删",
+          description: "",
+          status,
+          blockedBy: [],
+          writeScopes: [],
+        },
+      },
+    },
+  });
+  lead?.({ ...task("pending", "task-1"), event: { ...task("pending", "task-1").event, seq: 1 } });
+  lead?.(task("in_progress", "task-1"));
+  lead?.(task("pending", "task-2"));
+  lead?.(task("deleted", "task-2"));
+  expect(script.follows).toHaveLength(1);
+  lead?.({
+    type: "event",
+    event: {
+      type: "team/member",
+      seq: 5,
+      data: {
+        version: 1,
+        teamId: "dsh-1",
+        member: {
+          id: "mate-provisioning",
+          name: "writer",
+          description: "写",
+          provider: "dsh",
+          context: "fresh",
+          phase: "provisioning",
+        },
+      },
+    },
+  });
+  expect(script.follows).toHaveLength(1);
+  const provisioning = await until(
+    events,
+    (event) => event.type === "session.opened" && event.sessionId === "mate-provisioning",
+  );
+  expect(provisioning).toMatchObject({
+    title: "writer",
+    description: "写",
+    parentSessionId: "paseo-1",
+  });
+  lead?.({
+    type: "event",
+    event: {
+      type: "team/member",
+      seq: 6,
+      data: {
+        version: 1,
+        teamId: "dsh-1",
+        member: {
+          id: "mate",
+          name: "reviewer",
+          description: "看 diff",
+          provider: "dsh",
+          context: "fresh",
+          phase: "active",
+        },
+      },
+    },
+  });
+  expect(script.follows).toHaveLength(2);
+  script.follows[1]?.({ type: "snapshot", records: [] });
+  const opened = await until(
+    events,
+    (event) => event.type === "session.opened" && event.sessionId === "mate",
+  );
+  expect(opened).toMatchObject({
+    title: "reviewer",
+    description: "看 diff",
+    parentSessionId: "paseo-1",
+  });
+  lead?.({
+    type: "event",
+    event: { type: "team/message/queued", seq: 7, data: { version: 1, teamId: "dsh-1" } },
+  });
+  const todos = events.filter(
+    (event) => event.type === "timeline.item" && event.item.type === "todo",
+  );
+  const latest = todos.at(-1);
+  expect(latest).toMatchObject({
+    sessionId: "paseo-1",
+    item: {
+      items: [{ id: "task-1", text: "写文档", status: "in_progress", completed: false }],
+    },
+  });
+  expect(
+    events.some((event) => event.type === "timeline.item" && event.item.type === "plugin"),
+  ).toBe(false);
+  expect(roster.read("dsh-1")).toMatchObject({
+    providerSessionId: "paseo-1",
+    tasks: [{ id: "task-1", status: "in_progress" }],
+    children: [
+      { sessionId: "mate-provisioning", kind: "teammate", phase: "provisioning" },
+      { sessionId: "mate", kind: "teammate", phase: "active" },
+    ],
+  });
+  expect(roster.read("paseo-1")?.tasks).toHaveLength(1);
   await connection.close();
 });
 
@@ -510,6 +708,35 @@ test("a subagent row opens under its parent", async () => {
     event: "api-session/added",
     args: [{ origin: "subagent", sessionId: "child", parentSessionId: "dsh-1", cwd: "/repo" }],
   });
+  script.follows.at(-1)?.({
+    type: "snapshot",
+    records: [
+      {
+        type: "event",
+        event: {
+          type: "subagent/descriptor",
+          seq: 1,
+          data: { label: "调研", mode: "continuable" },
+        },
+      },
+      {
+        type: "event",
+        event: {
+          type: "user/message",
+          seq: 2,
+          data: {
+            source: { kind: "agent-message" },
+            content: [{ type: "text", text: "去做" }],
+          },
+        },
+      },
+      { type: "event", event: { type: "turn/start", seq: 3, data: {} } },
+      {
+        type: "event",
+        event: { type: "turn/end", seq: 4, data: { reason: { kind: "completed" } } },
+      },
+    ],
+  });
   const opened = await until(
     events,
     (event) => event.type === "session.opened" && event.sessionId === "child",
@@ -517,8 +744,483 @@ test("a subagent row opens under its parent", async () => {
   expect(opened).toMatchObject({
     parentSessionId: "paseo-1",
     restoration: "parent",
+    title: "调研",
     persistence: { data: { sessionId: "child" } },
   });
+  expect(opened).not.toHaveProperty("description");
+  expect(events).toContainEqual(
+    expect.objectContaining({
+      type: "timeline.item",
+      sessionId: "child",
+      item: expect.objectContaining({ text: "去做" }),
+    }),
+  );
+  await until(
+    events,
+    (event) =>
+      event.type === "session.turn" && event.sessionId === "child" && event.state === "completed",
+  );
+  await connection.close();
+});
+
+test("the catalog projection opens every child the log page left out", async () => {
+  const { script, provider } = harness([desktop], desktop, "build");
+  const { connection, events } = await open(provider, script);
+  await connection.send({
+    type: "session.open",
+    requestId: "open-1",
+    sessionId: "paseo-1",
+    history: "skip",
+    config: { cwd: "/repo", env: {}, mcpServers: {}, settings: {}, persist: true },
+  });
+  await until(events, (event) => event.type === "session.ready");
+  script.follows[0]?.({
+    type: "snapshot",
+    projections: {
+      values: {
+        subagentCatalog: [
+          { id: "child-a", label: "甲", mode: "continuable" },
+          { id: "child-b", label: "乙", mode: "one-shot" },
+        ],
+      },
+    },
+    records: [],
+  });
+  const opened = events.filter(
+    (event) => event.type === "session.opened" && event.parentSessionId === "paseo-1",
+  );
+  expect(opened.map((event) => (event.type === "session.opened" ? event.sessionId : ""))).toEqual([
+    "child-a",
+    "child-b",
+  ]);
+  expect(opened).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({ sessionId: "child-a", title: "甲" }),
+      expect.objectContaining({ sessionId: "child-b", title: "乙" }),
+    ]),
+  );
+  await connection.close();
+});
+
+test("a child that is still running is not left failed by an older turn", async () => {
+  const { script, provider } = harness([desktop], desktop, "build");
+  const { connection, events } = await open(provider, script);
+  await connection.send({
+    type: "session.open",
+    requestId: "open-1",
+    sessionId: "paseo-1",
+    history: "skip",
+    config: { cwd: "/repo", env: {}, mcpServers: {}, settings: {}, persist: true },
+  });
+  await until(events, (event) => event.type === "session.ready");
+  script.events[0]?.({
+    type: "emit",
+    event: "api-session/added",
+    args: [{ origin: "subagent", sessionId: "child", parentSessionId: "dsh-1", cwd: "/repo" }],
+  });
+  script.childRunning = true;
+  script.follows.at(-1)?.({
+    type: "snapshot",
+    records: [
+      {
+        type: "event",
+        event: { type: "subagent/descriptor", seq: 1, data: { label: "调研" } },
+      },
+      {
+        type: "event",
+        event: {
+          type: "turn/end",
+          seq: 2,
+          data: { reason: { kind: "error", error: { message: "stale" } } },
+        },
+      },
+    ],
+  });
+  await until(
+    events,
+    (event) =>
+      event.type === "session.turn" && event.sessionId === "child" && event.state === "started",
+  );
+  expect(events.some((event) => event.type === "session.turn" && event.state === "failed")).toBe(
+    false,
+  );
+  await connection.close();
+});
+
+test("an idle child is not failed when its last turn ended in error", async () => {
+  const { script, provider } = harness([desktop], desktop, "build");
+  const { connection, events } = await open(provider, script);
+  await connection.send({
+    type: "session.open",
+    requestId: "open-1",
+    sessionId: "paseo-1",
+    history: "skip",
+    config: { cwd: "/repo", env: {}, mcpServers: {}, settings: {}, persist: true },
+  });
+  await until(events, (event) => event.type === "session.ready");
+  script.events[0]?.({
+    type: "emit",
+    event: "api-session/added",
+    args: [{ origin: "subagent", sessionId: "child", parentSessionId: "dsh-1", cwd: "/repo" }],
+  });
+  script.follows.at(-1)?.({
+    type: "snapshot",
+    projections: {
+      values: {
+        subagent: { label: "调研", mode: "continuable" },
+        subagentTiming: { settledMs: 0, lastTurnCompleted: false },
+      },
+    },
+    records: [
+      {
+        type: "event",
+        event: {
+          type: "turn/end",
+          seq: 2,
+          data: { reason: { kind: "error", error: { message: "stale" } } },
+        },
+      },
+    ],
+  });
+  const notice = await until(
+    events,
+    (event) => event.type === "session.notice" && event.sessionId === "child",
+  );
+  expect(notice).toMatchObject({
+    notice: { description: "可继续 · 未在运行" },
+  });
+  expect(events.some((event) => event.type === "session.turn" && event.state === "failed")).toBe(
+    false,
+  );
+  expect(events).toContainEqual(
+    expect.objectContaining({ type: "session.turn", sessionId: "child", state: "completed" }),
+  );
+  await connection.close();
+});
+
+test("a child name comes from the identity projection when the descriptor is off the page", async () => {
+  const { script, provider } = harness([desktop], desktop, "build");
+  const { connection, events } = await open(provider, script);
+  await connection.send({
+    type: "session.open",
+    requestId: "open-1",
+    sessionId: "paseo-1",
+    history: "skip",
+    config: { cwd: "/repo", env: {}, mcpServers: {}, settings: {}, persist: true },
+  });
+  await until(events, (event) => event.type === "session.ready");
+  script.events[0]?.({
+    type: "emit",
+    event: "api-session/added",
+    args: [{ origin: "subagent", sessionId: "child", parentSessionId: "dsh-1", cwd: "/repo" }],
+  });
+  script.follows.at(-1)?.({
+    type: "snapshot",
+    projections: {
+      values: {
+        subagent: { label: "调研", mode: "one-shot" },
+        title: "查资料",
+        subagentTiming: { settledMs: 3000, lastTurnCompleted: true },
+        tokenUsage: {
+          uncachedInputTokens: 1000,
+          outputTokens: 500,
+          cacheReadTokens: 0,
+          cacheWriteTokens: 0,
+        },
+      },
+    },
+    records: [],
+  });
+  const opened = await until(
+    events,
+    (event) => event.type === "session.opened" && event.sessionId === "child",
+  );
+  expect(opened).toMatchObject({ title: "调研" });
+  expect(opened).not.toHaveProperty("description");
+  const notice = await until(
+    events,
+    (event) => event.type === "session.notice" && event.sessionId === "child",
+  );
+  expect(notice).toMatchObject({
+    notice: { description: "查资料 · 一次性 · 已完成 · 1.5k · 3秒" },
+  });
+  await connection.close();
+});
+
+test("a one-shot child with no label is named by its session id", async () => {
+  const { script, provider } = harness([desktop], desktop, "build");
+  const { connection, events } = await open(provider, script);
+  await connection.send({
+    type: "session.open",
+    requestId: "open-1",
+    sessionId: "paseo-1",
+    history: "skip",
+    config: { cwd: "/repo", env: {}, mcpServers: {}, settings: {}, persist: true },
+  });
+  await until(events, (event) => event.type === "session.ready");
+  script.follows[0]?.({
+    type: "snapshot",
+    projections: { values: { subagentCatalog: [{ id: "plain", mode: "one-shot" }] } },
+    records: [],
+  });
+  script.follows.at(-1)?.({ type: "snapshot", records: [] });
+  const opened = await until(
+    events,
+    (event) => event.type === "session.opened" && event.sessionId === "plain",
+  );
+  expect(opened).toMatchObject({ title: "plain" });
+  const notice = await until(
+    events,
+    (event) => event.type === "session.notice" && event.sessionId === "plain",
+  );
+  expect(notice).toMatchObject({ notice: { description: "一次性 · 未在运行" } });
+  await connection.close();
+});
+
+test("an external child is completed without a log or an activity", async () => {
+  const { script, provider } = harness([desktop], desktop, "build");
+  const { connection, events } = await open(provider, script);
+  await connection.send({
+    type: "session.open",
+    requestId: "open-1",
+    sessionId: "paseo-1",
+    history: "skip",
+    config: { cwd: "/repo", env: {}, mcpServers: {}, settings: {}, persist: true },
+  });
+  await until(events, (event) => event.type === "session.ready");
+  const follows = script.follows.length;
+  script.follows[0]?.({
+    type: "snapshot",
+    projections: {
+      values: { subagentCatalog: [{ id: "ext", label: "外面", mode: "external" }] },
+    },
+    records: [],
+  });
+  const opened = await until(
+    events,
+    (event) => event.type === "session.opened" && event.sessionId === "ext",
+  );
+  expect(opened).toMatchObject({ title: "外面" });
+  expect(script.follows).toHaveLength(follows);
+  expect(events).toContainEqual(
+    expect.objectContaining({ type: "session.turn", sessionId: "ext", state: "completed" }),
+  );
+  expect(events).toContainEqual(
+    expect.objectContaining({
+      type: "session.notice",
+      sessionId: "ext",
+      notice: expect.objectContaining({ description: "外部" }),
+    }),
+  );
+  await connection.close();
+});
+
+test("a failed teammate stays failed", async () => {
+  const { script, provider } = harness([desktop], desktop, "build");
+  const { connection, events } = await open(provider, script);
+  await connection.send({
+    type: "session.open",
+    requestId: "open-1",
+    sessionId: "paseo-1",
+    history: "skip",
+    config: { cwd: "/repo", env: {}, mcpServers: {}, settings: {}, persist: true },
+  });
+  await until(events, (event) => event.type === "session.ready");
+  script.follows[0]?.({
+    type: "event",
+    event: {
+      type: "team/member",
+      seq: 1,
+      data: {
+        version: 1,
+        teamId: "dsh-1",
+        member: {
+          id: "mate-failed",
+          name: "writer",
+          description: "写",
+          phase: "failed",
+        },
+      },
+    },
+  });
+  await until(
+    events,
+    (event) =>
+      event.type === "session.turn" &&
+      event.sessionId === "mate-failed" &&
+      event.state === "failed",
+  );
+  expect(script.follows).toHaveLength(1);
+  expect(
+    events.some(
+      (event) =>
+        event.type === "session.turn" &&
+        event.sessionId === "mate-failed" &&
+        event.state === "completed",
+    ),
+  ).toBe(false);
+  await connection.close();
+});
+
+test("a child log page keeps the older rows ahead of the tail", async () => {
+  const { script, provider } = harness([desktop], desktop, "build");
+  const { connection, events } = await open(provider, script);
+  await connection.send({
+    type: "session.open",
+    requestId: "open-1",
+    sessionId: "paseo-1",
+    history: "skip",
+    config: { cwd: "/repo", env: {}, mcpServers: {}, settings: {}, persist: true },
+  });
+  await until(events, (event) => event.type === "session.ready");
+  script.events[0]?.({
+    type: "emit",
+    event: "api-session/added",
+    args: [
+      {
+        origin: "subagent",
+        sessionId: "child",
+        parentSessionId: "dsh-1",
+        cwd: "/repo",
+        projections: { values: { subagent: { label: "调研" } } },
+      },
+    ],
+  });
+  script.historyPages = [
+    {
+      hasMore: false,
+      records: [
+        {
+          type: "event",
+          event: {
+            type: "user/message",
+            seq: 1,
+            data: {
+              source: { kind: "agent-message" },
+              content: [{ type: "text", text: "先做这个" }],
+            },
+          },
+        },
+      ],
+    },
+  ];
+  script.follows.at(-1)?.({
+    type: "snapshot",
+    hasMore: true,
+    records: [
+      {
+        type: "event",
+        event: {
+          type: "assistant/message",
+          seq: 8,
+          data: { message: { content: [{ type: "text", text: "后半段" }] } },
+        },
+      },
+    ],
+  });
+  await until(
+    events,
+    (event) => event.type === "timeline.item" && event.item.type === "user_message",
+  );
+  const texts = events.flatMap((event) =>
+    event.type === "timeline.item" && event.sessionId === "child" && "text" in event.item
+      ? [event.item.text]
+      : [],
+  );
+  expect(texts).toEqual(["先做这个", "后半段"]);
+  await connection.close();
+});
+
+test("a child approval is answered by that child and titled with its name", async () => {
+  const { script, provider } = harness([desktop], desktop, "build");
+  const { connection, events } = await open(provider, script);
+  await connection.send({
+    type: "session.open",
+    requestId: "open-1",
+    sessionId: "paseo-1",
+    history: "skip",
+    config: { cwd: "/repo", env: {}, mcpServers: {}, settings: {}, persist: true },
+  });
+  await until(events, (event) => event.type === "session.ready");
+  script.events[0]?.({
+    type: "emit",
+    event: "api-session/added",
+    args: [
+      {
+        origin: "subagent",
+        sessionId: "child",
+        parentSessionId: "dsh-1",
+        cwd: "/repo",
+        projections: { values: { subagent: { label: "调研" } } },
+      },
+    ],
+  });
+  script.follows.at(-1)?.({
+    type: "snapshot",
+    records: [
+      {
+        type: "event",
+        event: { type: "subagent/descriptor", seq: 1, data: { label: "调研" } },
+      },
+    ],
+  });
+  await until(events, (event) => event.type === "session.opened" && event.sessionId === "child");
+  script.events[0]?.({
+    type: "waterfall",
+    event: "approval/request",
+    eventId: "approval-child",
+    agentId: "child",
+    request: { toolName: "bash", reason: "run ls" },
+  });
+  const permission = await until(events, (event) => event.type === "session.permission");
+  expect(permission).toMatchObject({
+    sessionId: "paseo-1",
+    request: { id: "approval-child", title: "调研", description: "run ls", name: "bash" },
+  });
+  await connection.send({
+    type: "session.permission",
+    sessionId: "paseo-1",
+    permissionId: "approval-child",
+    response: { behavior: "allow", selectedActionId: "allow" },
+  });
+  await until(events, (event) => event.type === "session.permission_resolved");
+  expect(script.calls.find((call) => call.endpoint === "$events/result")?.args).toMatchObject({
+    clientId: "client-1",
+    eventId: "approval-child",
+    outcome: { kind: "result", value: "allowed-once" },
+  });
+  await connection.close();
+});
+
+test("an approval for a session that is not open is declined", async () => {
+  const { script, provider } = harness([desktop], desktop, "build");
+  const { connection, events } = await open(provider, script);
+  await connection.send({
+    type: "session.open",
+    requestId: "open-1",
+    sessionId: "paseo-1",
+    history: "skip",
+    config: { cwd: "/repo", env: {}, mcpServers: {}, settings: {}, persist: true },
+  });
+  await until(events, (event) => event.type === "session.ready");
+  script.events[0]?.({
+    type: "waterfall",
+    event: "approval/request",
+    eventId: "approval-missing",
+    agentId: "other",
+    request: { toolName: "bash", reason: "run ls" },
+  });
+  const deadline = Date.now() + 2000;
+  while (!script.calls.some((call) => call.endpoint === "$events/result")) {
+    if (Date.now() > deadline) throw new Error("Missing waterfall decline");
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  expect(script.calls.find((call) => call.endpoint === "$events/result")?.args).toEqual({
+    clientId: "client-1",
+    eventId: "approval-missing",
+    outcome: { kind: "next" },
+  });
+  expect(events.some((event) => event.type === "session.permission")).toBe(false);
   await connection.close();
 });
 
@@ -787,15 +1489,150 @@ test("an unreachable saved host is not available and the catalog key changes", a
     expect(status.diagnostic).toContain("not accepting connections");
     expect(status.diagnostic).toContain("Paste the browser address again.");
     expect(status.diagnostic).not.toContain("http");
+    expect(pool.hasAttachment(next.id)).toBe(false);
+    expect(await sessions.read()).toBeUndefined();
     const retried = await provider.getCatalogCacheKey!({ scope: "global" });
     expect(retried).not.toBe(connected);
-    expect(await sessions.read()).toMatchObject({ installId: next.id });
+    const again = await provider.status!({});
+    expect(again.available).toBe(false);
+    expect(again.diagnostic).toContain("Paste this client's loopback login link");
+    const settled = await provider.getCatalogCacheKey!({ scope: "global" });
+    expect(settled).toBe(retried);
+    await sessions.write({
+      installId: next.id,
+      origin: "http://127.0.0.1:4010",
+      cookie: "dsh-auth=cookie",
+    });
+    const blocked = await provider.getCatalogCacheKey!({ scope: "global" });
+    expect(blocked).toBe(settled);
+    expect(pool.hasAttachment(next.id)).toBe(false);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
 });
 
-test("a model without reasoning does not inherit another model's effort", async () => {
+test("an open connection follows a newly attached host", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "dsh-session-"));
+  try {
+    const first = new Script();
+    const second = new Script();
+    const scripts = [first, second];
+    let index = 0;
+    const controls: HostControls = {
+      spawn() {
+        throw new Error("build");
+      },
+      async exchange(loginUrl) {
+        return { origin: new URL(loginUrl).origin, cookie: "dsh-auth=cookie" };
+      },
+      connect() {
+        const script = scripts[index] ?? second;
+        index += 1;
+        return script;
+      },
+    };
+    const pool = new HostPool(controls);
+    const sessions = new SessionFile(path.join(directory, "session.json"));
+    await sessions.write({
+      installId: next.id,
+      origin: "http://127.0.0.1:4010",
+      cookie: "dsh-auth=cookie",
+    });
+    const provider = createDshProvider({
+      settings: settings({ installId: next.id, mode: "attach" }),
+      pool,
+      sessions,
+      discover: async () => [next],
+    });
+    const connection = await provider.connect({
+      versions: [1],
+      capabilities: PROVIDER_CAPABILITIES,
+    });
+    const events: ProviderEvent[] = [];
+    connection.onEvent((event) => events.push(event));
+    await pool.attach(next, "http://127.0.0.1:4011/?token=secret");
+    await connection.send({ type: "catalog", requestId: "cat-next" });
+    await until(events, (event) => event.type === "catalog");
+    expect(second.calls.some((call) => call.endpoint === "session/modelCatalog")).toBe(true);
+    expect(first.calls.some((call) => call.endpoint === "session/modelCatalog")).toBe(false);
+    expect(second.events).toHaveLength(1);
+    await connection.close();
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("a stale unauthorized catalog does not forget a newer login", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "dsh-session-"));
+  try {
+    const first = new Script();
+    const second = new Script();
+    let release: () => void = () => {};
+    first.holdCatalog = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    first.unauthorizedCatalog = true;
+    const scripts = [first, second];
+    let index = 0;
+    const controls: HostControls = {
+      spawn() {
+        throw new Error("build");
+      },
+      async exchange(loginUrl) {
+        return { origin: new URL(loginUrl).origin, cookie: "dsh-auth=cookie" };
+      },
+      connect() {
+        const script = scripts[index] ?? second;
+        index += 1;
+        return script;
+      },
+    };
+    const pool = new HostPool(controls);
+    const sessions = new SessionFile(path.join(directory, "session.json"));
+    await sessions.write({
+      installId: next.id,
+      origin: "http://127.0.0.1:4010",
+      cookie: "dsh-auth=old",
+    });
+    const provider = createDshProvider({
+      settings: settings({ installId: next.id, mode: "attach" }),
+      pool,
+      sessions,
+      discover: async () => [next],
+    });
+    const connection = await provider.connect({
+      versions: [1],
+      capabilities: PROVIDER_CAPABILITIES,
+    });
+    const events: ProviderEvent[] = [];
+    connection.onEvent((event) => events.push(event));
+    void connection.send({ type: "catalog", requestId: "cat-old" });
+    const deadline = Date.now() + 2000;
+    while (first.calls.length === 0) {
+      if (Date.now() > deadline) throw new Error("catalog did not start");
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    await pool.attach(next, "http://127.0.0.1:4011/?token=secret");
+    await sessions.write({
+      installId: next.id,
+      origin: "http://127.0.0.1:4011",
+      cookie: "dsh-auth=new",
+    });
+    release();
+    await until(events, (event) => event.type === "request.failed");
+    expect(await sessions.read()).toMatchObject({ cookie: "dsh-auth=new" });
+    expect(pool.hasAttachment(next.id)).toBe(true);
+    await connection.send({ type: "catalog", requestId: "cat-new" });
+    await until(events, (event) => event.type === "catalog");
+    expect(second.calls.some((call) => call.endpoint === "session/modelCatalog")).toBe(true);
+    expect(first.calls.filter((call) => call.endpoint === "session/modelCatalog")).toHaveLength(1);
+    await connection.close();
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("a model without reasoning offers the efforts another catalog model declared", async () => {
   const { script, provider } = harness([desktop], desktop, "build");
   script.catalog = {
     default: { provider: "deepseek-official", model: "deepseek-flash" },
@@ -844,17 +1681,332 @@ test("a model without reasoning does not inherit another model's effort", async 
   });
   await until(events, (event) => event.type === "session.ready");
   expect(script.calls.find((call) => call.endpoint === "session/selectModel")?.args).toEqual({
-    request: { sessionId: "dsh-1", provider: "a6api", model: "gpt-6.1-sol" },
+    request: {
+      sessionId: "dsh-1",
+      provider: "a6api",
+      model: "gpt-6.1-sol",
+      reasoningEffort: "high",
+    },
   });
   const config = events.find((event) => event.type === "session.config");
   const models = config && config.type === "session.config" ? config.config.models : [];
-  expect(models.find((model) => model.id === unsupported)?.thinkingOptions).toEqual([]);
+  expect(models.find((model) => model.id === unsupported)?.thinkingOptions).toEqual([
+    { id: "off", label: "Off" },
+    { id: "high", label: "High", isDefault: true },
+  ]);
   expect(models.find((model) => model.id === supported)).toMatchObject({
     defaultThinkingOptionId: "high",
   });
-  expect(config && config.type === "session.config" ? config.config.thinkingOption : "set").toBe(
-    undefined,
+  expect(
+    config && config.type === "session.config" ? config.config.thinkingOption : undefined,
+  ).toBe("high");
+  await connection.close();
+});
+
+test("a rejected reasoning effort still opens the session", async () => {
+  const { script, provider } = harness([desktop], desktop, "build");
+  script.rejectUnsupportedEffort = true;
+  script.catalog = {
+    default: { provider: "deepseek-official", model: "deepseek-flash" },
+    groups: [
+      {
+        id: "deepseek-official",
+        name: "DeepSeek",
+        models: [
+          {
+            id: "deepseek-flash",
+            name: "DeepSeek-V4.1-Flash",
+            reasoning: { efforts: [{ id: "high", name: "High" }], defaultEffort: "high" },
+          },
+        ],
+      },
+      {
+        id: "a6api",
+        name: "A6API",
+        models: [{ id: "gpt-6.1-sol", name: "gpt-6.1-sol", reasoning: null }],
+      },
+    ],
+  };
+  const unsupported = JSON.stringify(["a6api", "gpt-6.1-sol"]);
+  const { connection, events } = await open(provider, script);
+  await connection.send({
+    type: "session.open",
+    requestId: "open-1",
+    sessionId: "paseo-1",
+    history: "replay",
+    config: {
+      cwd: "/repo",
+      env: {},
+      mcpServers: {},
+      settings: {},
+      persist: true,
+      model: unsupported,
+      thinkingOption: "high",
+    },
+  });
+  await until(events, (event) => event.type === "session.ready");
+  const selects = script.calls.filter((call) => call.endpoint === "session/selectModel");
+  expect(selects.map((call) => call.args)).toEqual([
+    {
+      request: {
+        sessionId: "dsh-1",
+        provider: "a6api",
+        model: "gpt-6.1-sol",
+        reasoningEffort: "high",
+      },
+    },
+    { request: { sessionId: "dsh-1", provider: "a6api", model: "gpt-6.1-sol" } },
+  ]);
+  expect(events.some((event) => event.type === "request.failed")).toBe(false);
+  const config = events.find((event) => event.type === "session.config");
+  expect(
+    config && config.type === "session.config" ? config.config.thinkingOption : undefined,
+  ).toBe(undefined);
+  await connection.close();
+});
+
+test("a resumed session shows the host thinking effort and the model name", async () => {
+  const { script, provider } = harness([desktop], desktop, "build");
+  script.catalog = {
+    default: { provider: "deepseek", model: "v4" },
+    groups: [
+      {
+        id: "deepseek",
+        name: "DeepSeek",
+        models: [
+          {
+            id: "v4",
+            name: "V4",
+            description: "Fast",
+            reasoning: {
+              efforts: [
+                { id: "high", name: "High", description: "Deeper" },
+                { id: "max", name: "Max" },
+              ],
+              defaultEffort: "high",
+            },
+          },
+        ],
+      },
+    ],
+  };
+  script.projections = {
+    kind: "sequenced",
+    asOfSeq: 4,
+    values: {
+      modelSelection: {
+        lastUsed: { provider: "deepseek", model: "v4" },
+        next: { provider: "deepseek", model: "v4", reasoningEffort: "high" },
+      },
+    },
+  };
+  const { connection, events } = await open(provider, script);
+  await connection.send({
+    type: "session.open",
+    requestId: "open-1",
+    sessionId: "paseo-1",
+    history: "replay",
+    config: { cwd: "/repo", env: {}, mcpServers: {}, settings: {}, persist: true },
+  });
+  await until(events, (event) => event.type === "session.ready");
+  expect(script.calls.some((call) => call.endpoint === "session/selectModel")).toBe(false);
+  const config = events.find((event) => event.type === "session.config");
+  expect(config && config.type === "session.config" ? config.config : {}).toMatchObject({
+    model: modelId(),
+    thinkingOption: "high",
+    models: [
+      expect.objectContaining({
+        id: modelId(),
+        label: "V4",
+        description: "Fast",
+        aliases: ["v4", "deepseek/v4"],
+        isDefault: true,
+        thinkingOptions: [
+          { id: "high", label: "High", description: "Deeper", isDefault: true },
+          { id: "max", label: "Max" },
+        ],
+      }),
+    ],
+  });
+  const model = config && config.type === "session.config" ? config.config.models[0] : undefined;
+  expect(model?.description).not.toBe(model?.id);
+  script.follows[0]?.({
+    type: "event",
+    event: {
+      type: "model/selection",
+      seq: 5,
+      data: { provider: "deepseek", model: "v4", reasoningEffort: "max" },
+    },
+  });
+  const updated = await until(
+    events,
+    (event) => event.type === "session.config" && event.config.thinkingOption === "max",
   );
+  expect(updated.type === "session.config" ? updated.config.thinkingOption : undefined).toBe("max");
+  await connection.close();
+});
+
+test("context window uses the host profile and the composer select", async () => {
+  const { script, provider } = harness([desktop], desktop, "build");
+  script.providers = [
+    {
+      provider: "deepseek",
+      displayName: "DeepSeek",
+      settingsNs: "llm-deepseek",
+      settingsPath: [],
+    },
+  ];
+  script.described = {
+    namespaces: [
+      {
+        ns: "llm-deepseek",
+        revision: 3,
+        value: {
+          defaultContextWindow: 1_000_000,
+          models: [
+            { id: "v4", name: "V4", contextWindow: 1_000_000 },
+            { id: "other", name: "Other", contextWindow: 256_000 },
+          ],
+        },
+        base: {
+          defaultContextWindow: 1_000_000,
+          models: [
+            { id: "v4", name: "V4" },
+            { id: "other", name: "Other", contextWindow: 256_000 },
+          ],
+        },
+      },
+    ],
+  };
+  const { connection, events } = await open(provider, script);
+  await connection.send({
+    type: "session.open",
+    requestId: "open-1",
+    sessionId: "paseo-1",
+    history: "replay",
+    config: {
+      cwd: "/repo",
+      env: {},
+      mcpServers: {},
+      settings: {},
+      persist: true,
+      model: modelId(),
+    },
+  });
+  await until(events, (event) => event.type === "session.ready");
+  const config = events.find((event) => event.type === "session.config");
+  expect(config && config.type === "session.config" ? config.config.controls : []).toEqual([
+    {
+      type: "select",
+      key: "permission",
+      label: "访问权限",
+      icon: "shield-check",
+      defaultValue: "workspace-write",
+      choices: [
+        { value: "workspace-write", label: "工作区写入" },
+        { value: "danger-full-access", label: "完全写入" },
+      ],
+    },
+    {
+      type: "select",
+      key: "contextWindow",
+      label: "Context window",
+      defaultValue: "1000000",
+      choices: [
+        { value: "256000", label: "256K" },
+        { value: "1000000", label: "1M" },
+      ],
+    },
+  ]);
+  expect(config && config.type === "session.config" ? config.config.models[0] : {}).toMatchObject({
+    contextWindowMaxTokens: 1_000_000,
+  });
+  const usage = events.find((event) => event.type === "session.usage");
+  expect(usage && usage.type === "session.usage" ? usage.usage.contextWindowMaxTokens : 0).toBe(
+    1_000_000,
+  );
+  await connection.send({
+    type: "session.configure",
+    requestId: "config-1",
+    sessionId: "paseo-1",
+    changes: { providerOptions: { contextWindow: "256000" } },
+  });
+  await until(
+    events,
+    (event) => event.type === "request.completed" && event.requestId === "config-1",
+  );
+  expect(script.calls.find((call) => call.endpoint === "settings/mutate")?.args).toEqual({
+    ns: "llm-deepseek",
+    expectedRevision: 3,
+    ops: [
+      {
+        op: "set",
+        path: ["models"],
+        value: [
+          { id: "v4", name: "V4", contextWindow: 256_000 },
+          { id: "other", name: "Other", contextWindow: 256_000 },
+        ],
+      },
+    ],
+  });
+  await connection.close();
+});
+
+test("the composer switches access without starting a turn", async () => {
+  const { script, provider } = harness([desktop], desktop, "build");
+  const { connection, events } = await open(provider, script);
+  await connection.send({
+    type: "session.open",
+    requestId: "open-1",
+    sessionId: "paseo-1",
+    history: "replay",
+    config: { cwd: "/repo", env: {}, mcpServers: {}, settings: {}, persist: true },
+  });
+  await until(events, (event) => event.type === "session.ready");
+  script.follows[0]?.({
+    type: "snapshot",
+    records: [
+      {
+        type: "event",
+        event: { type: "permission/preset", seq: 2, data: { preset: "read-only" } },
+      },
+    ],
+  });
+  const preset = await until(
+    events,
+    (event) =>
+      event.type === "session.config" && event.config.providerOptions?.permission === "read-only",
+  );
+  expect(preset.type === "session.config" ? preset.config.controls?.[0] : undefined).toMatchObject({
+    key: "permission",
+    defaultValue: "read-only",
+    choices: [
+      { value: "workspace-write", label: "工作区写入" },
+      { value: "danger-full-access", label: "完全写入" },
+      { value: "read-only", label: "read-only" },
+    ],
+  });
+  expect(preset.type === "session.config" ? preset.config.modes : []).toEqual([
+    { id: "default", label: "智能体" },
+    { id: "plan", label: "计划" },
+  ]);
+  const prompts = script.calls.filter((call) => call.endpoint === "session/prompt").length;
+  await connection.send({
+    type: "session.configure",
+    requestId: "perm-1",
+    sessionId: "paseo-1",
+    changes: { providerOptions: { permission: "danger-full-access" } },
+  });
+  await until(
+    events,
+    (event) => event.type === "request.completed" && event.requestId === "perm-1",
+  );
+  expect(script.calls.findLast((call) => call.endpoint === "commands/execute")?.args).toEqual({
+    agentId: "dsh-1",
+    line: "/permission danger-full-access",
+    submittedAttachments: [],
+  });
+  expect(script.calls.filter((call) => call.endpoint === "session/prompt")).toHaveLength(prompts);
   await connection.close();
 });
 

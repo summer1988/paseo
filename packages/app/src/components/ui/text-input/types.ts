@@ -20,6 +20,8 @@ export interface EditingTextInputProps extends Omit<
 > {
   initialValue?: string;
   onChangeText?: (text: string) => void;
+  /** Web IME: true from compositionstart until compositionend. */
+  onCompositionChange?: (composing: boolean) => void;
   onPasteImages?: (files: readonly NativePastedFile[]) => void;
   onPasteError?: (message: string) => void;
   variant?: "default" | "bottom-sheet";

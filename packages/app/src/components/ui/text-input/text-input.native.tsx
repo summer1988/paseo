@@ -32,6 +32,7 @@ export const EditingTextInput = forwardRef<EditingTextInputHandle, EditingTextIn
     const {
       initialValue = "",
       onChangeText,
+      onCompositionChange: _composition,
       onPasteImages,
       onPasteError,
       variant = isInsideBottomSheet ? "bottom-sheet" : "default",

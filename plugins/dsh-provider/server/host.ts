@@ -38,8 +38,11 @@ export function defaultHostControls(): HostControls {
 export class HostPool {
   private owned: { id: string; host: LiveHost; child: ChildProcess } | undefined;
   private readonly attached = new Map<string, LiveHost>();
+  private readonly epochs = new WeakMap<LiveHost, number>();
+  private readonly deadOrigins = new Set<string>();
   private generation = 0;
   private transportEpoch = 0;
+  private transportNotedFor = -1;
 
   constructor(private readonly controls: HostControls = defaultHostControls()) {}
 
@@ -90,6 +93,7 @@ export class HostPool {
       this.attached.delete(install.id);
     }
     const session = await this.controls.exchange(loginUrl);
+    this.clearDead(install.id);
     this.remember(install.id, session);
     return session;
   }
@@ -102,6 +106,7 @@ export class HostPool {
       );
     }
     if (this.attached.has(install.id)) return;
+    if (this.deadOrigins.has(deadOriginKey(install.id, session.origin))) return;
     this.remember(install.id, session);
   }
 
@@ -110,13 +115,30 @@ export class HostPool {
     return this.attached.has(installId) ? this.generation : 0;
   }
 
-  /** Changes after a connection failure so the next catalog read tries again. */
+  /** The login generation stamped onto the current attachments. */
+  loginEpoch(): number {
+    return this.generation;
+  }
+
+  /** The generation this host was attached in, if Paseo attached it. */
+  epochOf(host: LiveHost): number | undefined {
+    return this.epochs.get(host);
+  }
+
+  /** Bumps once for the current login. A repeated failure keeps the catalog key stable. */
   transportGeneration(): number {
     return this.transportEpoch;
   }
 
   noteTransportFailure(): void {
+    if (this.transportNotedFor === this.generation) return;
+    this.transportNotedFor = this.generation;
     this.transportEpoch += 1;
+  }
+
+  /** Ignores a saved login whose host already failed for this install. */
+  markDead(installId: string, origin: string): void {
+    this.deadOrigins.add(deadOriginKey(installId, origin));
   }
 
   attachment(installId: string): LiveHost | undefined {
@@ -137,16 +159,31 @@ export class HostPool {
     await Promise.all(hosts.map((host) => host.close()));
   }
 
+  /** Drops the attachments only when they are still the login that failed. */
+  async dropIfCurrent(epoch: number): Promise<void> {
+    if (this.generation !== epoch) return;
+    await this.dropAttached();
+  }
+
+  private clearDead(installId: string): void {
+    const prefix = `${installId}\0`;
+    for (const key of this.deadOrigins) {
+      if (key.startsWith(prefix)) this.deadOrigins.delete(key);
+    }
+  }
+
   private remember(installId: string, session: { origin: string; cookie: string }): void {
     const client = this.controls.connect(session);
-    this.attached.set(installId, {
+    const host: LiveHost = {
       client,
       owned: false,
       close: async () => {
         await client.close();
       },
-    });
+    };
     this.generation += 1;
+    this.epochs.set(host, this.generation);
+    this.attached.set(installId, host);
   }
 
   async closeOwned(): Promise<void> {
@@ -212,6 +249,10 @@ function waitForReady(child: ChildProcess, ipc: boolean): Promise<string> {
     );
     child.once("error", (error) => fail(new DshError("startup", error.message)));
   });
+}
+
+function deadOriginKey(installId: string, origin: string): string {
+  return `${installId}\0${origin}`;
 }
 
 async function stopChild(child: ChildProcess, ipc: boolean): Promise<void> {

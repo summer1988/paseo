@@ -1657,6 +1657,7 @@ export const zhCN: TranslationResources = {
     chooseModelForCommands: "选择模型以查看命令",
   },
   loadOlderHistory: {
+    action: "加载更早",
     failed: "无法加载更早历史",
   },
   imageAttachmentPicker: {

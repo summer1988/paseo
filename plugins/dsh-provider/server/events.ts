@@ -14,8 +14,26 @@ export interface MappedEvent {
   items: ProviderTimelineItem[];
   usage?: ProviderUsage;
   mode?: string;
+  permission?: string;
   turn?: { state: "started" | "completed" | "failed" | "canceled"; error?: string };
-  child?: { sessionId: string; parentSessionId: string; title?: string; cwd?: string };
+  child?: {
+    sessionId: string;
+    parentSessionId?: string;
+    title?: string;
+    description?: string;
+    cwd?: string;
+    mode?: string;
+    kind?: "subagent" | "teammate";
+  };
+  teamTask?: TeamTaskFact;
+}
+
+export interface TeamTaskFact {
+  id: string;
+  subject: string;
+  description: string;
+  status: "pending" | "in_progress" | "completed" | "deleted";
+  ownerId?: string;
 }
 
 const PROVIDER_DEFAULT_THINKING = "provider-default";
@@ -53,6 +71,8 @@ export interface LiveAttempt {
   attemptId: string;
   text: string;
   reasoning: string;
+  turn?: number;
+  step?: number;
 }
 
 export interface LiveFrameResult {
@@ -69,7 +89,16 @@ export function reduceAssistantFrame(
 ): LiveFrameResult {
   if (!isRecord(frame) || typeof frame.type !== "string") return { state, items: [] };
   if (frame.type === "start" && typeof frame.attemptId === "string") {
-    return { state: { attemptId: frame.attemptId, text: "", reasoning: "" }, items: [] };
+    return {
+      state: {
+        attemptId: frame.attemptId,
+        text: "",
+        reasoning: "",
+        ...(typeof frame.turn === "number" ? { turn: frame.turn } : {}),
+        ...(typeof frame.step === "number" ? { step: frame.step } : {}),
+      },
+      items: [],
+    };
   }
   if (frame.type === "end") {
     const outcome = isRecord(frame.outcome) ? frame.outcome : undefined;
@@ -86,6 +115,34 @@ export function reduceAssistantFrame(
 
 export function liveItemId(attemptId: string, kind: "assistant" | "reasoning"): string {
   return kind === "assistant" ? `live:${attemptId}` : `live:${attemptId}:reasoning`;
+}
+
+/**
+ * The durable assistant/message is committed before its stream end frame.
+ * Fold it onto the open attempt so the live row and the settled row stay one message.
+ */
+export function attemptIdForAssistantSettlement(
+  attempt: LiveAttempt | undefined,
+  event: { type: string; surfaceOp?: unknown; data: unknown },
+): string | undefined {
+  if (!attempt || event.type !== "assistant/message") return undefined;
+  if (event.surfaceOp !== undefined && event.surfaceOp !== "append") return undefined;
+  if (!isRecord(event.data)) return attempt.attemptId;
+  if (
+    typeof event.data.turn === "number" &&
+    attempt.turn !== undefined &&
+    event.data.turn !== attempt.turn
+  ) {
+    return undefined;
+  }
+  if (
+    typeof event.data.step === "number" &&
+    attempt.step !== undefined &&
+    event.data.step !== attempt.step
+  ) {
+    return undefined;
+  }
+  return attempt.attemptId;
 }
 
 /** A finished tool row keeps the name and shape of the call that started it. */
@@ -111,7 +168,6 @@ export function rememberContextWindow(
 }
 
 const hiddenEventTypes = new Set([
-  "permission/preset",
   "sandbox/mode",
   "approval/policy",
   "model/selection",
@@ -131,14 +187,25 @@ const hiddenEventTypes = new Set([
   "session/end-seed",
   "approval/asked",
   "approval/decided",
+  "subagent/descriptor",
+  "system/message",
+  "session",
+  "team/message/queued",
+  "team/message/delivered",
 ]);
 
-export function mapWireEvent(event: WireEvent): MappedEvent {
+const childUserSources = new Set(["user", "agent-message"]);
+
+export function mapWireEvent(event: WireEvent, audience: "root" | "child" = "root"): MappedEvent {
   if (hiddenEventTypes.has(event.type)) return { items: [] };
+  return mapTimelineEvent(event, audience) ?? mapSessionSignal(event);
+}
+
+function mapTimelineEvent(event: WireEvent, audience: "root" | "child"): MappedEvent | undefined {
   const id = `event:${event.seq}`;
   switch (event.type) {
     case "user/message":
-      if (!humanMessage(event.data)) return { items: [] };
+      if (!humanMessage(event.data, audience)) return { items: [] };
       return { items: userMessageItems(id, event.data) };
     case "request/context":
       return contextWindow(event.data);
@@ -152,6 +219,16 @@ export function mapWireEvent(event: WireEvent): MappedEvent {
       return { items: [todoItem(event.data)] };
     case "plan/mode":
       return planMode(event.data);
+    case "permission/preset":
+      return permissionPreset(event.data);
+    default:
+      return undefined;
+  }
+}
+
+function mapSessionSignal(event: WireEvent): MappedEvent {
+  const id = `event:${event.seq}`;
+  switch (event.type) {
     case "compaction/start":
     case "compaction/end":
       return { items: [compactionItem(event.type, event.data)] };
@@ -161,6 +238,12 @@ export function mapWireEvent(event: WireEvent): MappedEvent {
       return { items: [], turn: turnEnd(event.data) };
     case "goal/change":
       return { items: [pluginItem(id, "dsh-goal", event)] };
+    case "subagent/catalog":
+      return catalogChild(event.data);
+    case "team/task":
+      return teamTask(event.data);
+    case "team/member":
+      return teamMember(event.data);
     default:
       return childFromSummary(event) ?? { items: [pluginItem(id, "dsh-event", event)] };
   }
@@ -174,9 +257,270 @@ export function mapAddedSession(summary: unknown): MappedEvent["child"] | undefi
   return {
     sessionId: summary.sessionId,
     parentSessionId: summary.parentSessionId,
-    title: typeof summary.title === "string" ? summary.title : undefined,
+    title: summaryLabel(summary),
     cwd: typeof summary.cwd === "string" ? summary.cwd : undefined,
+    mode: typeof summary.mode === "string" ? summary.mode : undefined,
   };
+}
+
+/** Direct children from the parent's catalog projection. The follow page omits older catalog events. */
+export function catalogEntries(
+  projections: unknown,
+): { id: string; label?: string; mode?: string }[] {
+  if (!isRecord(projections) || !isRecord(projections.values)) return [];
+  const catalog = projections.values.subagentCatalog;
+  if (!Array.isArray(catalog)) return [];
+  return catalog.flatMap((entry) => {
+    if (!isRecord(entry) || typeof entry.id !== "string" || !entry.id) return [];
+    return [
+      {
+        id: entry.id,
+        ...(typeof entry.label === "string" && entry.label.trim() ? { label: entry.label } : {}),
+        ...(typeof entry.mode === "string" ? { mode: entry.mode } : {}),
+      },
+    ];
+  });
+}
+
+export function childLabelFromSnapshot(records: unknown): string | undefined {
+  if (!Array.isArray(records)) return undefined;
+  for (const record of records) {
+    if (!isRecord(record) || !isRecord(record.event)) continue;
+    const event = record.event;
+    if (event.type !== "subagent/descriptor" || !isRecord(event.data)) continue;
+    if (typeof event.data.label === "string" && event.data.label.trim()) return event.data.label;
+  }
+  return undefined;
+}
+
+export interface ChildActiveSpan {
+  since: number;
+  through: number;
+}
+
+export interface ChildTiming {
+  settledMs: number;
+  active?: ChildActiveSpan;
+  lastTurnCompleted?: boolean;
+}
+
+export interface ChildProjection {
+  label?: string;
+  mode?: string;
+  sessionTitle?: string;
+  lastTurnCompleted?: boolean;
+  tokenTotal?: number;
+  timing?: ChildTiming;
+}
+
+export interface ChildSubtitleFacts {
+  sessionTitle?: string;
+  mode?: string;
+  external: boolean;
+  running: boolean;
+  lastTurnCompleted: boolean;
+  tokenTotal?: number;
+  durationMs?: number;
+}
+
+/** Identity, timing, title, and token total from one child follow snapshot. */
+export function readChildProjection(projections: unknown): ChildProjection {
+  const values = projectionValues(projections);
+  const subagent = isRecord(values.subagent) ? values.subagent : undefined;
+  const timing = readTiming(values.subagentTiming);
+  const tokenTotal = readTokenTotal(values.tokenUsage);
+  const facts: ChildProjection = {};
+  const label = readTrimmed(subagent?.label);
+  const mode = readTrimmed(subagent?.mode);
+  const sessionTitle = readTrimmed(values.title);
+  if (label) facts.label = label;
+  if (mode) facts.mode = mode;
+  if (sessionTitle) facts.sessionTitle = sessionTitle;
+  if (timing) {
+    facts.timing = timing;
+    if (timing.lastTurnCompleted !== undefined) facts.lastTurnCompleted = timing.lastTurnCompleted;
+  }
+  if (tokenTotal !== undefined) facts.tokenTotal = tokenTotal;
+  return facts;
+}
+
+/** Duration DSH shows: settled time, plus the open span through now only while running. */
+export function childDuration(input: {
+  timing: ChildTiming | undefined;
+  running: boolean;
+  now: number;
+}): number | undefined {
+  const timing = input.timing;
+  if (!timing) return undefined;
+  if (!timing.active) return timing.settledMs;
+  const end = input.running ? input.now : timing.active.through;
+  return timing.settledMs + Math.max(0, end - timing.active.since);
+}
+
+/** One track line: session title, mode, activity, token total, duration. */
+export function formatChildSubtitle(facts: ChildSubtitleFacts): string | undefined {
+  const parts = [
+    facts.sessionTitle,
+    modeText(facts.mode),
+    activityText(facts),
+    facts.tokenTotal === undefined ? undefined : compactTokenTotal(facts.tokenTotal),
+    facts.durationMs === undefined ? undefined : formatDuration(facts.durationMs),
+  ].filter((part): part is string => part !== undefined);
+  if (parts.length === 0) return undefined;
+  return parts.join(" · ");
+}
+
+function projectionValues(projections: unknown): Record<string, unknown> {
+  if (!isRecord(projections) || !isRecord(projections.values)) return {};
+  return projections.values;
+}
+
+function readTiming(value: unknown): ChildTiming | undefined {
+  if (
+    !isRecord(value) ||
+    typeof value.settledMs !== "number" ||
+    !Number.isFinite(value.settledMs)
+  ) {
+    return undefined;
+  }
+  const timing: ChildTiming = { settledMs: value.settledMs };
+  if (
+    isRecord(value.active) &&
+    typeof value.active.since === "number" &&
+    typeof value.active.through === "number"
+  ) {
+    timing.active = { since: value.active.since, through: value.active.through };
+  }
+  if (typeof value.lastTurnCompleted === "boolean") {
+    timing.lastTurnCompleted = value.lastTurnCompleted;
+  }
+  return timing;
+}
+
+function readTokenTotal(value: unknown): number | undefined {
+  if (!isRecord(value)) return undefined;
+  const keys = ["uncachedInputTokens", "outputTokens", "cacheReadTokens", "cacheWriteTokens"];
+  let total = 0;
+  let seen = false;
+  for (const key of keys) {
+    const part = value[key];
+    if (typeof part !== "number" || !Number.isFinite(part)) continue;
+    total += part;
+    seen = true;
+  }
+  return seen ? total : undefined;
+}
+
+function readTrimmed(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
+function modeText(mode: string | undefined): string | undefined {
+  if (mode === "one-shot") return "一次性";
+  if (mode === "continuable") return "可继续";
+  if (mode === "external") return "外部";
+  if (mode === "unknown") return "未知";
+  return undefined;
+}
+
+function activityText(facts: ChildSubtitleFacts): string | undefined {
+  if (facts.external) return undefined;
+  if (facts.running) return "正在运行";
+  if (facts.lastTurnCompleted) return "已完成";
+  return "未在运行";
+}
+
+function compactTokenTotal(tokens: number): string {
+  if (tokens < 1000) return String(Math.round(tokens));
+  if (tokens < 1_000_000) return `${Math.round(tokens / 100) / 10}k`;
+  return `${Math.round(tokens / 100_000) / 10}M`;
+}
+
+function formatDuration(ms: number): string | undefined {
+  if (ms < 1000) return undefined;
+  const totalSeconds = Math.floor(ms / 1000);
+  const totalMinutes = Math.floor(totalSeconds / 60);
+  const totalHours = Math.floor(totalMinutes / 60);
+  const seconds = totalSeconds % 60;
+  const minutes = totalMinutes % 60;
+  if (totalHours > 0) return `${totalHours}小时${String(minutes).padStart(2, "0")}分`;
+  if (totalMinutes > 0) return `${totalMinutes}分${String(seconds).padStart(2, "0")}秒`;
+  return `${seconds}秒`;
+}
+
+function teamTask(data: unknown): MappedEvent {
+  const task = readTeamTask(data);
+  return task ? { items: [], teamTask: task } : { items: [] };
+}
+
+function readTeamTask(data: unknown): TeamTaskFact | undefined {
+  if (!isRecord(data) || !isRecord(data.task)) return undefined;
+  const task = data.task;
+  const status = task.status;
+  if (typeof task.id !== "string" || typeof task.subject !== "string") return undefined;
+  if (
+    status !== "pending" &&
+    status !== "in_progress" &&
+    status !== "completed" &&
+    status !== "deleted"
+  ) {
+    return undefined;
+  }
+  return {
+    id: task.id,
+    subject: task.subject,
+    description: typeof task.description === "string" ? task.description : "",
+    status,
+    ...(typeof task.ownerId === "string" ? { ownerId: task.ownerId } : {}),
+  };
+}
+
+function teamMember(data: unknown): MappedEvent {
+  if (!isRecord(data) || !isRecord(data.member)) return { items: [] };
+  const member = data.member;
+  if (typeof member.id !== "string" || typeof member.name !== "string" || !member.name.trim()) {
+    return { items: [] };
+  }
+  const phase =
+    member.phase === "provisioning" || member.phase === "failed" || member.phase === "active"
+      ? member.phase
+      : "active";
+  return {
+    items: [],
+    child: {
+      sessionId: member.id,
+      title: member.name,
+      ...(typeof member.description === "string" ? { description: member.description } : {}),
+      mode: phase,
+      kind: "teammate",
+    },
+  };
+}
+
+function catalogChild(data: unknown): MappedEvent {
+  if (!isRecord(data) || typeof data.childId !== "string") return { items: [] };
+  const label = typeof data.label === "string" ? data.label : undefined;
+  return {
+    items: [],
+    child: {
+      sessionId: data.childId,
+      title: label,
+      mode: typeof data.mode === "string" ? data.mode : undefined,
+    },
+  };
+}
+
+function summaryLabel(summary: Record<string, unknown>): string | undefined {
+  if (typeof summary.title === "string" && summary.title.trim()) return summary.title;
+  if (typeof summary.label === "string" && summary.label.trim()) return summary.label;
+  const projections = isRecord(summary.projections) ? summary.projections.values : undefined;
+  const subagent = isRecord(projections) ? projections.subagent : undefined;
+  if (isRecord(subagent) && typeof subagent.label === "string" && subagent.label.trim()) {
+    return subagent.label;
+  }
+  return undefined;
 }
 
 function childFromSummary(event: WireEvent): MappedEvent | undefined {
@@ -199,11 +543,12 @@ function assistantMessage(id: string, data: unknown): MappedEvent {
   return { items, ...(usage ? { usage } : {}) };
 }
 
-function humanMessage(data: unknown): boolean {
+function humanMessage(data: unknown, audience: "root" | "child"): boolean {
   if (!isRecord(data)) return false;
   const source = data.source;
   if (!isRecord(source) || typeof source.kind !== "string") return true;
-  return source.kind === "user";
+  if (source.kind === "user") return true;
+  return audience === "child" && childUserSources.has(source.kind);
 }
 
 function userMessageItems(id: string, data: unknown): ProviderTimelineItem[] {
@@ -371,10 +716,21 @@ function skillBody(text: string): { name: string; detail: ToolDetail } | undefin
 
 function toolDetail(name: string, args: string): ToolDetail {
   const parsed = parseJson(args);
-  const command = stringField(parsed, "command") ?? args;
-  if (name === "bash" || name === "shell" || name === "pwsh" || name === "powershell") {
-    return { type: "shell", command };
+  return (
+    shellDetail(name, parsed, args) ??
+    fileDetail(name, parsed) ??
+    searchDetail(name, parsed) ?? { type: "unknown", input: parsed, output: null }
+  );
+}
+
+function shellDetail(name: string, parsed: Json, args: string): ToolDetail | undefined {
+  if (name !== "bash" && name !== "shell" && name !== "pwsh" && name !== "powershell") {
+    return undefined;
   }
+  return { type: "shell", command: stringField(parsed, "command") ?? args };
+}
+
+function fileDetail(name: string, parsed: Json): ToolDetail | undefined {
   const filePath = stringField(parsed, "file_path") ?? stringField(parsed, "path") ?? "";
   if (name === "read" || name === "read_file") return { type: "read", filePath };
   if (name === "write" || name === "write_file") {
@@ -388,7 +744,65 @@ function toolDetail(name: string, args: string): ToolDetail {
       newString: stringField(parsed, "new_string"),
     };
   }
-  return { type: "unknown", input: parsed, output: null };
+  if (name === "apply_patch") return patchDetail(parsed);
+  if (name === "str_replace_editor") return editorDetail(parsed);
+  return undefined;
+}
+
+function patchDetail(parsed: Json): ToolDetail {
+  const patch = stringField(parsed, "input");
+  return { type: "edit", filePath: patchPath(patch), ...(patch ? { unifiedDiff: patch } : {}) };
+}
+
+function patchPath(patch: string | undefined): string {
+  const matched = patch ? /\*\*\* (?:Add|Update|Delete) File: ([^\n]+)/.exec(patch) : undefined;
+  return matched?.[1]?.trim() ?? "";
+}
+
+function editorDetail(parsed: Json): ToolDetail | undefined {
+  const filePath = stringField(parsed, "path") ?? "";
+  const command = stringField(parsed, "command");
+  if (command === "view") return { type: "read", filePath };
+  if (command === "create") {
+    return { type: "write", filePath, content: stringField(parsed, "file_text") };
+  }
+  if (command === "str_replace" || command === "insert") {
+    return {
+      type: "edit",
+      filePath,
+      oldString: stringField(parsed, "old_str"),
+      newString: stringField(parsed, "new_str"),
+    };
+  }
+  return undefined;
+}
+
+function searchDetail(name: string, parsed: Json): ToolDetail | undefined {
+  if (name === "grep" || name === "glob") {
+    const path = stringField(parsed, "path");
+    return {
+      type: "search",
+      query: stringField(parsed, "pattern") ?? "",
+      toolName: name,
+      ...(path ? { filePaths: [path] } : {}),
+    };
+  }
+  if (name === "web_search") {
+    return {
+      type: "search",
+      query: stringList(parsed, "queries").join("\n"),
+      toolName: "web_search",
+    };
+  }
+  if (name === "web_fetch") return { type: "fetch", url: stringField(parsed, "url") ?? "" };
+  return undefined;
+}
+
+function stringList(value: Json, key: string): string[] {
+  if (!isRecord(value) || !Array.isArray(value[key])) return [];
+  return value[key].filter(
+    (entry): entry is string => typeof entry === "string" && entry.length > 0,
+  );
 }
 
 function todoItem(data: unknown): ProviderTimelineItem {
@@ -410,6 +824,11 @@ function planMode(data: unknown): MappedEvent {
     return { items: [pluginItem("plan-mode", "dsh-event", data)] };
   }
   return { items: [], mode: data.active ? "plan" : "default" };
+}
+
+function permissionPreset(data: unknown): MappedEvent {
+  if (!isRecord(data) || typeof data.preset !== "string" || !data.preset) return { items: [] };
+  return { items: [], permission: data.preset };
 }
 
 function compactionItem(type: string, data: unknown): ProviderTimelineItem {
@@ -456,6 +875,8 @@ function outputOf(detail: ToolDetail): string {
   if (detail.type === "plain_text" && typeof detail.text === "string") return detail.text;
   if (detail.type === "shell" && typeof detail.output === "string") return detail.output;
   if (detail.type === "read" && typeof detail.content === "string") return detail.content;
+  if (detail.type === "search" && typeof detail.content === "string") return detail.content;
+  if (detail.type === "fetch" && typeof detail.result === "string") return detail.result;
   return "";
 }
 
@@ -463,6 +884,8 @@ function withOutput(detail: ToolDetail, output: string): ToolDetail {
   if (!output) return detail;
   if (detail.type === "shell") return { ...detail, output };
   if (detail.type === "read") return { ...detail, content: output };
+  if (detail.type === "search") return { ...detail, content: output };
+  if (detail.type === "fetch") return { ...detail, result: output };
   if (detail.type === "unknown") return { ...detail, output };
   return detail;
 }

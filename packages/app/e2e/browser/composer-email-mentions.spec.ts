@@ -21,7 +21,7 @@ async function selectReadmeMention(page: Page): Promise<void> {
   await expect(fileSuggestions(page).getByText("README.md", { exact: true })).toBeVisible();
   await expect(fileSuggestions(page).getByText("example.com", { exact: true })).toHaveCount(0);
   await composerLocator(page).press("Enter");
-  await expectComposerDraft(page, '"README.md"');
+  await expectComposerDraft(page, '"@README.md"');
 }
 
 async function sendEmailIntact(page: Page, email: string): Promise<void> {

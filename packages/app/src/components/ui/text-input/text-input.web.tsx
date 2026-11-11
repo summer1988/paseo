@@ -14,6 +14,7 @@ export const EditingTextInput = forwardRef<EditingTextInputHandle, EditingTextIn
     const {
       initialValue = "",
       onChangeText,
+      onCompositionChange,
       onPasteImages: _,
       onPasteError: __,
       variant: ___,
@@ -26,7 +27,9 @@ export const EditingTextInput = forwardRef<EditingTextInputHandle, EditingTextIn
     const textRef = useRef(initialTextRef.current);
     const isComposingRef = useRef(false);
     const onChangeTextRef = useRef(onChangeText);
+    const onCompositionChangeRef = useRef(onCompositionChange);
     onChangeTextRef.current = onChangeText;
+    onCompositionChangeRef.current = onCompositionChange;
 
     useEffect(() => {
       const input = inputRef.current as WebTextInputElement | null;
@@ -34,9 +37,15 @@ export const EditingTextInput = forwardRef<EditingTextInputHandle, EditingTextIn
 
       const startComposition = () => {
         isComposingRef.current = true;
+        // Inline color wins over the mention stylesheet. A React render here resets the
+        // uncontrolled field and cancels the IME candidate.
+        (input as unknown as HTMLElement).style.color = "var(--colors-foreground, CanvasText)";
+        onCompositionChangeRef.current?.(true);
       };
       const endComposition = () => {
         isComposingRef.current = false;
+        (input as unknown as HTMLElement).style.color = "";
+        onCompositionChangeRef.current?.(false);
         const nextText = input.value ?? "";
         if (nextText === textRef.current) return;
         textRef.current = nextText;

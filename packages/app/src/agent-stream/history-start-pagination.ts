@@ -129,8 +129,8 @@ export function createHistoryStartPagination(input: {
       } else if (!geometry.hasOlderHistory) {
         publish("dormant", true);
       } else {
-        publish("ready");
-        update();
+        // One page per visit. The next page waits for Load earlier or a later return to the start.
+        publish("dormant", true);
       }
     },
     rearm() {

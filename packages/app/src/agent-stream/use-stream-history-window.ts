@@ -1,6 +1,10 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { getStreamItemMessageId, type StreamItem } from "@/types/stream";
-import { findMountedWindowStart, getMountedRecentStreamItems } from "./history-window";
+import {
+  findMountedWindowStart,
+  getMaxMountedStreamItems,
+  getMountedRecentStreamItems,
+} from "./history-window";
 
 // Callers reveal a message, not a row: an assistant message is several block rows and
 // the window has to open at the first of them.
@@ -27,6 +31,10 @@ function findEarlierHistoryWindowStart(input: {
   });
 }
 
+function notNearBottom(): boolean {
+  return false;
+}
+
 interface HistoryWindowBoundary {
   boundaryItemId: string | null;
   initialized: boolean;
@@ -51,8 +59,11 @@ function reconcileHistoryWindow(input: {
 export function useStreamHistoryWindow(input: {
   items: StreamItem[];
   loadRemoteOlder: () => boolean | Promise<boolean>;
+  /** Read at render. Following the tail keeps at most one page mounted. */
+  isNearBottom?: () => boolean;
 }) {
   const { items, loadRemoteOlder } = input;
+  const isNearBottom = input.isNearBottom ?? notNearBottom;
   const initialStart = useMemo(
     () => findMountedWindowStart({ items, minMountedCount: getMountedRecentStreamItems() }),
     [items],
@@ -75,6 +86,12 @@ export function useStreamHistoryWindow(input: {
       start = boundaryIndex;
     }
   }
+  if (isNearBottom()) {
+    const maxMounted = getMaxMountedStreamItems();
+    if (items.length - start > maxMounted) {
+      start = items.length - maxMounted;
+    }
+  }
 
   useEffect(() => {
     setWindow((current) =>
@@ -86,6 +103,17 @@ export function useStreamHistoryWindow(input: {
       }),
     );
   }, [boundaryIndex, initialBoundaryItemId, items.length]);
+
+  useEffect(() => {
+    if (!isNearBottom()) return;
+    const maxMounted = getMaxMountedStreamItems();
+    const currentStart = boundaryItemId === null ? 0 : boundaryIndex;
+    if (currentStart < 0 || items.length - currentStart <= maxMounted) return;
+    const nextStart = items.length - maxMounted;
+    const nextId = items[nextStart]?.id ?? null;
+    if (nextId === null || nextId === boundaryItemId) return;
+    setWindow({ boundaryItemId: nextId, initialized: true });
+  }, [boundaryIndex, boundaryItemId, isNearBottom, items]);
 
   const revealLoadedHistory = useCallback(
     (itemId?: string): boolean => {

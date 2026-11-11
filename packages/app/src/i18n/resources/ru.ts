@@ -1695,6 +1695,7 @@ export const ru: TranslationResources = {
     chooseModelForCommands: "Выберите модель, чтобы увидеть команды",
   },
   loadOlderHistory: {
+    action: "Загрузить раньше",
     failed: "Не удалось загрузить старую историю.",
   },
   imageAttachmentPicker: {

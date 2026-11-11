@@ -1683,6 +1683,7 @@ export const ja: TranslationResources = {
     chooseModelForCommands: "コマンドを表示するにはモデルを選択してください",
   },
   loadOlderHistory: {
+    action: "以前を読み込む",
     failed: "古い履歴を読み込めませんでした",
   },
   imageAttachmentPicker: {
